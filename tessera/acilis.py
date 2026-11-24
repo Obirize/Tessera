@@ -3,7 +3,7 @@ finished does the program's window appear. The page is loaded out of sight meanw
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional
+from typing import Callable
 
 from PySide6.QtCore import QElapsedTimer, QPropertyAnimation, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QImageReader, QPainter, QPainterPath, QPixmap
@@ -130,9 +130,16 @@ def start(path: str, make_window: Callable[[], QWidget], show: Callable[[QWidget
         sp.show()
         sp.repaint()
 
+        def play_when_loaded(n: int = 0) -> None:
+            # loading blocks the event loop now and then; playing afterwards keeps the motion smooth
+            if not is_ready(st["win"]) and n < 60:
+                QTimer.singleShot(50, lambda: play_when_loaded(n + 1))
+            else:
+                QTimer.singleShot(120, sp.play)
+
         def build() -> None:
             st["win"] = make_window()
-            sp.play()
+            play_when_loaded()
         QTimer.singleShot(30, build)
     else:
         st["played"] = True
@@ -140,6 +147,3 @@ def start(path: str, make_window: Callable[[], QWidget], show: Callable[[QWidget
         reveal()
     return st
 
-
-def wait_ready(flag: Optional[bool]) -> bool:
-    return bool(flag)
