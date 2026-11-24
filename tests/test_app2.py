@@ -233,7 +233,7 @@ def test_export_card_leads_with_template(qapp, bridge, tmp_path):
 # ------------------------------------------------------------------ the page in WebEngine
 def test_splash_assets_and_switch():
     html = open(os.path.join(app2.WEB_DIR, "index.html"), encoding="utf-8").read()
-    for f in ("acilis.webp", "tessera_icon.png", "tessera_kedi.ico"):
+    for f in ("acilis/tam.webp", "acilis/levha.webp", "acilis/taslar.json", "tessera_icon.png", "tessera_kedi.ico"):
         assert os.path.isfile(os.path.join(app2.WEB_DIR, f)), f
     assert 'id="splash"' not in html and 'id="f-acilis"' in html     # the card is its own window (acilis.py)
     js = open(os.path.join(app2.WEB_DIR, "app.js"), encoding="utf-8").read()

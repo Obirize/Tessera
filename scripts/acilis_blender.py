@@ -1,8 +1,7 @@
 """Render a cat-symbol stone layout (from iterasyon_kedi_tasarim.py) in Blender / Cycles.
 
-Still:      blender -b -P iterasyon_kedi_blender.py -- still <kedi_n.json> <out.png> [res] [samples]
-Animation:  blender -b -P iterasyon_kedi_blender.py -- anim  <kedi_n.json> <out_dir> [res] [samples] [style]
-            writes <out_dir>/f_0001.png ... ; style = drop | slide
+Still:      blender -b -P acilis_blender.py -- still <kedi_n.json> <out.png> [res] [samples]
+Layers:     blender -b -P acilis_blender.py -- katman <kedi_n.json> <out_dir> [res] [samples]
 Every stone is its own bevelled prism with a small tilt and height jitter, sitting on an ink base.
 """
 import json
@@ -182,7 +181,7 @@ def inradius(pts):
 
 
 # ------------------------------------------------------------------ paper ground (animation only)
-if MODE == "anim":
+if MODE == "katman":
     scn.render.film_transparent = False
     bpy.ops.mesh.primitive_plane_add(size=40, location=(0, 0, -PLATE_T - 0.001))
     gp = bpy.context.object
@@ -205,7 +204,7 @@ for i, s in enumerate(data["stones"]):
     h = H0 * s["h"] * (1 + random.uniform(-0.10, 0.10))
     bev = max(0.004, min(0.024, r * 0.4))
     jit = random.uniform(-0.05, 0.05)
-    ob = prism(f"s{i}", loc, 0.0, h, bev, material(s["col"], jit, fade=(MODE == "anim")))
+    ob = prism(f"s{i}", loc, 0.0, h, bev, material(s["col"], jit, fade=False))
     tilt = math.radians(2.4 if s["col"] not in METAL else 4.0)
     ob.location = (cx, cy_, 0.0)
     ob.rotation_euler = (random.uniform(-tilt, tilt), random.uniform(-tilt, tilt), random.uniform(-0.012, 0.012))
@@ -252,104 +251,30 @@ co.location = target + dirv * DIST
 co.rotation_euler = ROT
 
 
-def ease_out_cubic(t):
-    return 1 - (1 - t) ** 3
-
-
-def ease_out_back(t, s=1.25):
-    t -= 1
-    return 1 + (s + 1) * t ** 3 + s * t ** 2
-
-
-def ease_in_out(t):
-    return t * t * (3 - 2 * t)
-
-
 if MODE == "still":
     scn.render.filepath = OUT
     bpy.ops.render.render(write_still=True)
     print("STILL DONE", len(stones))
     sys.exit(0)
 
-# ------------------------------------------------------------------ animation
-N_FR = int(round(2.2 * FPS))
-HOLD = 8
-FLIGHT = 13
-scn.render.fps = FPS
-scn.frame_start, scn.frame_end = 1, N_FR
-scn.render.use_motion_blur = True
-scn.render.motion_blur_shutter = 0.45
-scn.render.filepath = OUT.rstrip("/\\") + "/f_"
-
-last_land = N_FR - HOLD
-start_window = last_land - FLIGHT     # stones start between frame 1 and this
-# choreography: which regions arrive when (0 first .. 1 last); eyes always close the sequence
-SEQ = {
-    "3": {"bg": 0.0, "ruff": 0.30, "ear": 0.36, "ear_in": 0.42, "face": 0.50, "nose": 0.74,
-          "eye": 0.90, "pupil": 0.92},
-    "4": {"bust": 0.0, "ruff": 0.06, "ear": 0.10, "ear_in": 0.13, "face": 0.12, "nose": 0.28,
-          "ring": 0.78, "eye": 0.92, "pupil": 0.94},
-}.get(data["key"], {})
-
-
-def region_order(s):
-    r = s["region"]
-    if r.startswith("gold") and r[4:].isdigit():
-        return 0.30 + 0.075 * int(r[4:])
-    return SEQ.get(r, s["order"])
-
-
-RANK = {"pupil": 0, "eye": 0, "nose": 1, "face": 2, "ear_in": 3, "ear": 4, "ruff": 5, "bg": 6}
-keyed = sorted(range(len(stones)), key=lambda i: (RANK.get(stones[i][1]["region"], 5),
-               stones[i][1]["cy"] < -9, round(math.atan2(stones[i][1]["cx"], stones[i][1]["cy"]), 3)))
-n_eye = sum(RANK.get(s["region"], 5) == 0 for _, s in stones)
-orders = [0.0] * len(stones)
-for pos, i in enumerate(keyed):        # the eyes land first and alone, the rest follows one by one
-    orders[i] = pos * 0.35 if pos < n_eye else n_eye * 0.35 + 5.0 + (pos - n_eye)
-lo, hi = min(orders), max(orders)
-print("ORDER", [stones[i][1]["region"] for i in keyed])
-
-for (ob, s), o in zip(stones, orders):
-    t0 = 1 + (o - lo) / max(hi - lo, 1e-6) * (start_window - 1)
-    base_loc = Vector(ob.location)
-    base_rot = Euler(ob.rotation_euler)
-    rr = math.hypot(s["cx"], s["cy"]) + 1e-6
-    out = Vector((s["cx"] / rr, s["cy"] / rr, 0))
-    spin = random.uniform(-0.45, 0.45)
-    for f in range(1, N_FR + 1):
-        t = (f - t0) / FLIGHT
-        t = min(1.0, max(0.0, t))
-        if s["col"] in METAL:   # gold tesserae flip over as they land and catch the light
-            e = ease_out_cubic(t)
-            ob.location = base_loc + Vector((0, 0, (1 - e) * 0.6)) + out * (1 - e) * 0.06
-            tang = math.atan2(out.y, out.x)
-            flip = (1 - e) * 2.2
-            ob.rotation_euler = (base_rot.x + flip * -math.sin(tang), base_rot.y + flip * math.cos(tang),
-                                 base_rot.z + (1 - e) * spin * 0.4)
-            sc = 0.9 + 0.1 * e
-        elif STYLE == "drop":
-            e = ease_out_cubic(t)
-            lift = (1 - e) * 0.9
-            ob.location = base_loc + Vector((0, 0, lift)) + out * (1 - e) * 0.10
-            ob.rotation_euler = (base_rot.x + (1 - e) * 0.35 * math.copysign(1, spin),
-                                 base_rot.y + (1 - e) * spin * 0.6, base_rot.z + (1 - e) * spin)
-            sc = 1.0 + 0.55 * (1 - e)
-        else:  # slide: in from outside, rotating into place
-            e = ease_out_back(t, 1.1) if t < 1 else 1.0
-            ob.location = base_loc + out * (1 - e) * 0.55 + Vector((0, 0, (1 - ease_out_cubic(t)) * 0.25))
-            ob.rotation_euler = (base_rot.x, base_rot.y, base_rot.z + (1 - e) * spin * 2.2)
-            sc = 0.8 + 0.2 * ease_out_cubic(t)
-        ob.scale = (sc, sc, sc)
-        ob["fade"] = min(1.0, t / 0.28)
-        ob.keyframe_insert("location", frame=f)
-        ob.keyframe_insert("rotation_euler", frame=f)
-        ob.keyframe_insert("scale", frame=f)
-        ob.keyframe_insert('["fade"]', frame=f)
-        ob.hide_render = t <= 0.0                 # not there yet: no stray shadow on the plate
-        ob.keyframe_insert("hide_render", frame=f)
-    for fc in ob.animation_data.action.fcurves:
-        for kp in fc.keyframe_points:
-            kp.interpolation = "LINEAR"
-
-bpy.ops.render.render(animation=True)
-print("ANIM DONE", len(stones))
+# ------------------------------------------------------------------ layers for the live opening card
+# katman <kedi.json> <out_dir> [res] [samples]: the finished picture, the empty plate and where every stone is.
+# tessera/acilis.py cuts the stones out of the finished picture and animates them live.
+scn.cycles.samples = SAMPLES
+for ob, _ in stones:
+    ob["fade"] = 1.0
+bpy.context.view_layer.update()
+out = {"scale": cam.ortho_scale, "cx": target.x, "cy": target.y, "stones": []}
+for ob, st in stones:
+    n = len(st["pts"])
+    ring = [ob.matrix_world @ v.co for v in list(ob.data.vertices)[n:2 * n]]
+    out["stones"].append({"region": st["region"], "col": st["col"], "cx": st["cx"], "cy": st["cy"],
+                          "pts": [[round(v.x, 4), round(v.y, 4)] for v in ring]})
+json.dump(out, open(OUT.rstrip("/\\") + "/katman.json", "w"))
+scn.render.filepath = OUT.rstrip("/\\") + "/tam.png"
+bpy.ops.render.render(write_still=True)
+for ob, _ in stones:
+    ob.hide_render = True
+scn.render.filepath = OUT.rstrip("/\\") + "/levha.png"
+bpy.ops.render.render(write_still=True)
+print("LAYERS DONE", len(stones))

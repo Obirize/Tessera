@@ -15,6 +15,7 @@ cikti/
 /scripts/*
 !/scripts/donustur.py
 !/scripts/acilis_blender.py
+!/scripts/acilis_hazirla.py
 !/scripts/iterasyon_kedi_ortak.py
 !/scripts/iterasyon_kedi_tasarim.py
 !/scripts/qa_ortak.py

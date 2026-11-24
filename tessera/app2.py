@@ -12,6 +12,7 @@ part meshes in a child process (ChildJob).
 """
 from __future__ import annotations
 
+import gc
 import json
 import mimetypes
 import os
@@ -22,9 +23,9 @@ import traceback
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import (QBuffer, QByteArray, QFile, QIODevice, QObject, QSettings, QStandardPaths, Qt,
+from PySide6.QtCore import (QBuffer, QByteArray, QFile, QIODevice, QObject, QRect, QSettings, QStandardPaths, Qt,
                             QTimer, QUrl, Signal, Slot)
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtGui import QColor, QDesktopServices, QIcon
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import (QWebEnginePage, QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestJob,
                                      QWebEngineUrlScheme, QWebEngineUrlSchemeHandler)
@@ -822,8 +823,9 @@ class MainWindow(QMainWindow):
         self.channel = QWebChannel(self.page)
         self.channel.registerObject("py", self.bridge)
         self.page.setWebChannel(self.channel)
-        self.page.setBackgroundColor(Qt.GlobalColor.transparent)
+        self.page.setBackgroundColor(QColor("#f3eee5"))
         self.setCentralWidget(self.view)
+        self.setStyleSheet("QMainWindow{background:#f3eee5}")   # never a white flash before the first paint
         self.view.load(QUrl("tessera://app/index.html"))
         self.loaded = False
         self.page.loadFinished.connect(self._loaded)
@@ -903,31 +905,92 @@ def make_app(argv=None) -> QApplication:
     ico = os.path.join(WEB_DIR, "tessera_kedi.ico")
     if os.path.exists(ico):
         app.setWindowIcon(QIcon(ico))
+    collect_on_gui_thread(app)
     return app
 
 
-def main(argv=None) -> int:
+def collect_on_gui_thread(app) -> None:
+    """Python's cycle collector runs on whichever thread happens to allocate; on the engine thread it
+    may destroy Qt objects there, which aborts the program. So it only runs here, on the GUI thread."""
+    if getattr(app, "_gc_timer", None) is not None:
+        return
+    gc.disable()
+    limit = gc.get_threshold()[0] or 2000
+    n = {"i": 0}
+
+    def step():
+        if gc.get_count()[0] < limit:
+            return
+        n["i"] += 1
+        gc.collect(1 if n["i"] % 20 else 2)
+
+    app._gc_timer = QTimer(app)
+    app._gc_timer.timeout.connect(step)
+    app._gc_timer.start(500)
+
+
+def to_front(win) -> None:
+    """Above other windows even if Windows refuses to hand over the focus; it does not stay on top."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    f = ctypes.windll.user32.SetWindowPos
+    f.argtypes = [ctypes.c_void_p, ctypes.c_void_p] + [ctypes.c_int] * 4 + [ctypes.c_uint]
+    for after in (-1, -2):                        # HWND_TOPMOST, then HWND_NOTOPMOST
+        f(int(win.winId()), ctypes.c_void_p(after), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+
+
+def main(argv=None, card=None) -> int:
+    """``card``: the opening card's handle (tessera.baslat); the window waits until it has finished."""
     argv = list(argv if argv is not None else sys.argv)
     app = make_app(argv)
-    from . import acilis
     target = argv[1] if len(argv) > 1 and os.path.exists(argv[1]) else None
+    win = MainWindow()
+    t = {"n": 0}
 
-    def show(win):
+    def open_target():
+        if not win.loaded:
+            QTimer.singleShot(200, open_target)
+        elif target.endswith(PROJECT_SUFFIX):
+            win.bridge.open(target)
+        else:
+            win.bridge.openImage(target)
+
+    def painted() -> bool:
+        """The dark title bar is really there (until the first paint the view is plain paper)."""
+        im = win.view.grab(QRect(0, 0, 320, 24)).toImage()
+        return any(im.pixelColor(x, im.height() // 2).lightness() < 90 for x in range(0, im.width(), 8))
+
+    def lift(n):
+        """The window is up but still see-through; swap it for the card in one go once it is painted."""
+        if n < 80 and not painted():
+            QTimer.singleShot(25, lambda: lift(n + 1))
+            return
+        win.setWindowOpacity(1.0)
+        to_front(win)
+        QTimer.singleShot(60, card.close)
+
+    def reveal():
+        t["n"] += 1
+        if card is not None and t["n"] < 400 and not (card.done.is_set() and (win.loaded or t["n"] > 300)):
+            QTimer.singleShot(25, reveal)         # at most 10 s, whatever happens to the card
+            return
+        if card is not None:
+            win.setWindowOpacity(0.0)
         win.show_initial()
         win.raise_()
         win.activateWindow()
+        if card is not None:
+            lift(0)
         if target:
-            def go():
-                if win.loaded:
-                    win.bridge.open(target) if target.endswith(PROJECT_SUFFIX) else win.bridge.openImage(target)
-                else:
-                    QTimer.singleShot(200, go)
-            QTimer.singleShot(300, go)
+            QTimer.singleShot(300, open_target)
 
-    # TESSERA_NO_SPLASH=1 skips the opening card (tests, scripted screenshots)
-    on = not os.environ.get("TESSERA_NO_SPLASH") and splash_enabled(QSettings("Tessera", "Tessera"))
-    app._start = acilis.start(os.path.join(WEB_DIR, "acilis.webp"), MainWindow, show, lambda w: w.loaded, on)
-    return app.exec()
+    reveal()
+    try:
+        return app.exec()
+    finally:
+        if card is not None:
+            card.close()
 
 
 if __name__ == "__main__":

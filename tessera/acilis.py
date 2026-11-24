@@ -1,149 +1,335 @@
-"""Opening card. It is its own small window: the cat assembles first, and only when the animation has
-finished does the program's window appear. The page is loaded out of sight meanwhile, so nothing waits."""
+"""Opening card: the cat is laid stone by stone, eyes first, seen straight from the front.
+
+It runs in its OWN process (``python -m tessera.acilis``), so loading the program can never make it
+stutter, and it draws the stones live at the screen's refresh rate. The program's window appears only
+after the card says it has finished.
+
+    program -> card   stdin   "kapan" (or end of input): fade away and quit
+    card -> program   stdout  "bitti": the cat is complete (or the user clicked to skip)
+"""
 from __future__ import annotations
 
+import json
+import math
 import os
-from typing import Callable
+import subprocess
+import sys
+import threading
 
-from PySide6.QtCore import QElapsedTimer, QPropertyAnimation, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QImageReader, QPainter, QPainterPath, QPixmap
-from PySide6.QtWidgets import QWidget
+HERE = os.path.dirname(os.path.abspath(__file__))
+DIR = os.path.join(HERE, "web", "acilis")
 
-SIZE, TEXT_H, MARGIN = 440, 86, 26
-PAPER, INK, INK2 = QColor(226, 216, 198), QColor(30, 28, 25), QColor(93, 87, 78)
-
-
-class Splash(QWidget):
-    def __init__(self, path: str, on_done: Callable[[], None]):
-        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.SplashScreen)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setWindowTitle("Tessera")
-        self.resize(SIZE + 2 * MARGIN, SIZE + TEXT_H + 2 * MARGIN)
-        self._done, self._finished = on_done, False
-        self.frames: list[QPixmap] = []
-        self.ends: list[int] = []
-        dpr = self.devicePixelRatioF()
-        rd = QImageReader(path)
-        t = 0
-        while rd.canRead():
-            im = rd.read()
-            if im.isNull():
-                break
-            t += max(10, rd.nextImageDelay() or 33)
-            px = QPixmap.fromImage(im.scaled(int(SIZE * dpr), int(SIZE * dpr), Qt.AspectRatioMode.IgnoreAspectRatio,
-                                             Qt.TransformationMode.SmoothTransformation))
-            px.setDevicePixelRatio(dpr)
-            self.frames.append(px)
-            self.ends.append(t)
-        self.i = 0
-        self.clock = QElapsedTimer()
-        self.timer = QTimer(self)
-        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self.timer.timeout.connect(self._tick)
-        scr = self.screen().availableGeometry()
-        self.move(scr.center() - self.rect().center())
-
-    def play(self) -> None:
-        if not self.frames:
-            return self._end()
-        self.clock.start()
-        self.timer.start(8)
-
-    def _tick(self) -> None:
-        ms = self.clock.elapsed()
-        while self.i < len(self.ends) - 1 and ms >= self.ends[self.i]:
-            self.i += 1
-        self.update()
-        if ms >= self.ends[-1]:
-            self._end()
-
-    def _end(self) -> None:
-        if not self._finished:
-            self._finished = True
-            self.timer.stop()
-            self._done()
-
-    def mousePressEvent(self, ev):  # noqa: N802 - a click skips the animation
-        self._end()
-
-    def keyPressEvent(self, ev):  # noqa: N802
-        self._end()
-
-    def fade_out(self) -> None:
-        self._fx = QPropertyAnimation(self, b"windowOpacity")
-        self._fx.setDuration(220)
-        self._fx.setStartValue(1.0)
-        self._fx.setEndValue(0.0)
-        self._fx.finished.connect(self.close)
-        self._fx.start()
-
-    def paintEvent(self, ev):  # noqa: N802
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        card = QRectF(MARGIN, MARGIN, SIZE, SIZE + TEXT_H)
-        for k in range(MARGIN, 0, -2):           # soft shadow
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(30, 22, 14, 3))
-            p.drawRoundedRect(card.adjusted(-k, -k + 6, k, k + 2), 14 + k, 14 + k)
-        clip = QPainterPath()
-        clip.addRoundedRect(card, 14, 14)
-        p.setClipPath(clip)
-        p.fillRect(card, PAPER)
-        if self.frames:
-            p.drawPixmap(MARGIN, MARGIN, self.frames[self.i])
-        f = QFont("Bahnschrift", 17, QFont.Weight.DemiBold)
-        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 7)
-        p.setFont(f)
-        p.setPen(INK)
-        p.drawText(QRectF(MARGIN + 4, MARGIN + SIZE + 2, SIZE, 38), Qt.AlignmentFlag.AlignCenter, "TESSERA")
-        p.setFont(QFont("Segoe UI", 9))
-        p.setPen(INK2)
-        p.drawText(QRectF(MARGIN, MARGIN + SIZE + 38, SIZE, 24), Qt.AlignmentFlag.AlignCenter, "taş taş mozaik")
+SIZE, TEXT_H, MARGIN = 440, 86, 30        # card, px
+# timeline, ms
+FADE_IN = 200
+EYES_AT, EYE_GAP, EYE_FLIGHT = 240, 80, 480
+REST_AT, GAP_FIRST, GAP_LAST, FLIGHT = 900, 54, 30, 380
+SETTLE, FINISH, HOLD = 140, 180, 260
+RANK = {"pupil": 0, "eye": 0, "nose": 1, "face": 2, "ear_in": 3, "ear": 4, "ruff": 5, "bg": 6}
 
 
-def start(path: str, make_window: Callable[[], QWidget], show: Callable[[QWidget], None],
-          is_ready: Callable[[QWidget], bool], enabled: bool = True) -> dict:
-    """Show the card, build the window out of sight, play, then reveal the window. Returns the state dict
-    (keep it alive)."""
-    st: dict = {"win": None, "splash": None, "played": not enabled}
+def schedule(stones: list) -> list:
+    """Start time and flight of every stone. Eyes together; then one stone after another, always
+    alternating left and right, so the face grows evenly from the middle."""
+    for s in stones:
+        xs, ys = [p[0] for p in s["pts"]], [p[1] for p in s["pts"]]
+        s["cx"], s["cy"] = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        s["rank"] = RANK.get(s["region"], 5)
+    eyes = sorted((s for s in stones if s["rank"] == 0), key=lambda s: -abs(s["cx"] - 0.5))
+    for i, s in enumerate(eyes):                  # outer halves of both eyes, then the inner ones
+        s["t0"], s["dur"] = EYES_AT + (i // 2) * EYE_GAP, EYE_FLIGHT
+    rest = []
+    for rank in sorted({s["rank"] for s in stones} - {0}):
+        grp = [s for s in stones if s["rank"] == rank]
+        sign = -1 if rank in (3, 4, 6) else 1     # ears and ground from the bottom up, the rest downwards
+        left = sorted((s for s in grp if s["cx"] < 0.495), key=lambda s: sign * s["cy"])
+        right = sorted((s for s in grp if s["cx"] > 0.505), key=lambda s: sign * s["cy"])
+        mid = [s for s in grp if 0.495 <= s["cx"] <= 0.505]
+        if rank != 5:
+            rest += mid
+        for a in range(max(len(left), len(right))):
+            rest += left[a:a + 1] + right[a:a + 1]
+        if rank == 5:                             # the collar closes at the bottom middle
+            rest += mid
+    t = float(REST_AT)
+    for i, s in enumerate(rest):
+        s["t0"], s["dur"] = t, FLIGHT
+        t += GAP_FIRST + (GAP_LAST - GAP_FIRST) * i / max(len(rest) - 1, 1)
+    return eyes + rest
 
-    def reveal() -> None:
-        w = st["win"]
-        if w is None or not st["played"] or st.get("shown"):
-            return
-        if not is_ready(w) and st["tries"] < 60:      # at most 6 s; the last frame stays on screen
-            st["tries"] += 1
-            QTimer.singleShot(100, reveal)
-            return
-        st["shown"] = True
-        show(w)
-        if st["splash"] is not None:
-            QTimer.singleShot(60, st["splash"].fade_out)
 
-    def played() -> None:
-        st["played"] = True
-        reveal()
+def total_ms(order: list) -> float:
+    return max(s["t0"] + s["dur"] for s in order) + FINISH + HOLD
 
-    st["tries"] = 0
-    if enabled and os.path.exists(path):
-        st["splash"] = sp = Splash(path, played)
-        sp.show()
-        sp.repaint()
 
-        def play_when_loaded(n: int = 0) -> None:
-            # loading blocks the event loop now and then; playing afterwards keeps the motion smooth
-            if not is_ready(st["win"]) and n < 60:
-                QTimer.singleShot(50, lambda: play_when_loaded(n + 1))
-            else:
-                QTimer.singleShot(120, sp.play)
+# ------------------------------------------------------------------ the program's side
+class Handle:
+    """What the program holds: is the card done, and tell it to go."""
 
-        def build() -> None:
-            st["win"] = make_window()
-            play_when_loaded()
-        QTimer.singleShot(30, build)
-    else:
-        st["played"] = True
-        st["win"] = make_window()
-        reveal()
-    return st
+    def __init__(self):
+        self.done = threading.Event()
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        self.p = subprocess.Popen([sys.executable, "-m", "tessera.acilis"], cwd=os.path.dirname(HERE),
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  creationflags=flags)
+        threading.Thread(target=self._read, daemon=True).start()
 
+    def _read(self):
+        try:
+            for line in self.p.stdout:
+                if line.strip() == b"bitti":
+                    break
+        except OSError:
+            pass
+        self.done.set()                           # finished, skipped or gone: never keep the program waiting
+
+    def close(self):
+        try:
+            self.p.stdin.write(b"kapan\n")
+            self.p.stdin.close()
+        except (OSError, ValueError):
+            pass
+
+
+def spawn():
+    try:
+        return Handle() if os.path.exists(os.path.join(DIR, "taslar.json")) else None
+    except OSError:
+        return None
+
+
+# ------------------------------------------------------------------ the card
+def main() -> int:
+    from PySide6.QtCore import QElapsedTimer, QObject, QPointF, QRectF, Qt, QTimer, Signal
+    from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPixmap, QPolygonF
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    PAPER, INK, INK2 = QColor(228, 219, 203), QColor(30, 28, 25), QColor(93, 87, 78)
+    app = QApplication(["tessera"])
+    with open(os.path.join(DIR, "taslar.json"), encoding="utf-8") as fh:
+        d = json.load(fh)
+    order = schedule(d["stones"])
+    END = total_ms(order)
+    FMT = QImage.Format.Format_ARGB32_Premultiplied
+    HINT = QPainter.RenderHint
+    SMOOTH, STRETCH = Qt.TransformationMode.SmoothTransformation, Qt.AspectRatioMode.IgnoreAspectRatio
+
+    def blurred(path, w: int, h: int, pad: int, r: int, alpha: int):
+        """Soft shadow of a path given in w x h px."""
+        im = QImage(w + 2 * pad, h + 2 * pad, FMT)
+        im.fill(0)
+        p = QPainter(im)
+        p.setRenderHint(HINT.Antialiasing)
+        p.translate(pad, pad)
+        p.fillPath(path, QColor(12, 8, 4, alpha))
+        p.end()
+        for _ in range(2):
+            small = im.scaled(max(1, im.width() // r), max(1, im.height() // r), STRETCH, SMOOTH)
+            im = small.scaled(im.width(), im.height(), STRETCH, SMOOTH)
+        return im
+
+    class Card(QWidget):
+        def __init__(self):
+            super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+                             | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus)
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+            self.resize(SIZE + 2 * MARGIN, SIZE + TEXT_H + 2 * MARGIN)
+            self.move(self.screen().availableGeometry().center() - self.rect().center())
+            self.k = k = self.devicePixelRatioF()
+            self.N = N = int(round(SIZE * k))
+
+            def load(name):
+                im = QImage(os.path.join(DIR, name)).convertToFormat(FMT)
+                return im.scaled(N, N, STRETCH, SMOOTH)
+
+            def path_of(pts, ox=0.0, oy=0.0):
+                q = QPainterPath()
+                q.addPolygon(QPolygonF([QPointF(x * N - ox, y * N - oy) for x, y in pts]))
+                q.closeSubpath()
+                return q
+
+            full = load("tam.webp")
+            plate = load("levha.webp")
+            # background: card, its shadow, the plate and its shadow (drawn once)
+            bg = QImage(int(self.width() * k), int(self.height() * k), FMT)
+            bg.fill(0)
+            card = QPainterPath()
+            card.addRoundedRect(QRectF(0, 0, SIZE * k, (SIZE + TEXT_H) * k), 14 * k, 14 * k)
+            m = int(MARGIN * k)
+            p = QPainter(bg)
+            p.setRenderHint(HINT.Antialiasing)
+            p.drawImage(0, int(6 * k), blurred(card, int(SIZE * k), int((SIZE + TEXT_H) * k), m, int(9 * k), 95))
+            p.translate(m, m)
+            p.fillPath(card, PAPER)
+            p.drawImage(int(5 * k), int(8 * k), blurred(path_of(d["plate"]), N, N, 0, int(7 * k), 120))
+            p.drawImage(0, 0, plate)
+            p.end()
+            self.bg = QPixmap.fromImage(bg)
+            self.full = QPixmap.fromImage(full)
+            # board: finished stones are baked here, so a frame only draws the ones in the air
+            self.board = QPixmap(N, N)
+            self.board.fill(Qt.GlobalColor.transparent)
+            for s in order:
+                r = path_of(s["pts"]).boundingRect().adjusted(-1, -1, 1, 1).toAlignedRect()
+                s["r"] = QRectF(r)
+                im = QImage(r.size(), FMT)
+                im.fill(0)
+                p = QPainter(im)
+                p.setRenderHint(HINT.Antialiasing)
+                p.fillPath(path_of(s["pts"], r.x(), r.y()), Qt.GlobalColor.white)
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+                p.drawImage(-r.x(), -r.y(), full)
+                p.end()
+                s["px"] = QPixmap.fromImage(im)
+                s["pad"] = pad = int(14 * k)
+                s["sh"] = QPixmap.fromImage(blurred(path_of(s["pts"], r.x(), r.y()), r.width(), r.height(), pad,
+                                                    int(5 * k), 150))
+                s["spin"] = (7.0 if s["cx"] < 0.5 else -7.0) * (0.6 if s["rank"] == 0 else 1.0)
+                s["baked"] = False
+            self.clock = QElapsedTimer()
+            self.said = self.leaving = False
+            self.left_at = 0.0
+            hz = max(50.0, min(240.0, self.screen().refreshRate() or 60.0))
+            self.timer = QTimer(self)
+            self.timer.setTimerType(Qt.TimerType.PreciseTimer)
+            self.timer.timeout.connect(self.tick)
+            self.timer.start(max(4, int(1000 / hz)))
+            self.setWindowOpacity(0.0)
+
+        def now(self) -> float:
+            return self.clock.nsecsElapsed() / 1e6 if self.clock.isValid() else 0.0
+
+        def tick(self):
+            if not self.clock.isValid():
+                return
+            t = self.now()
+            if self.leaving:
+                u = min(1.0, (t - self.left_at) / 240)
+                self.setWindowOpacity(1 - u * u * (3 - 2 * u))
+                if u >= 1:
+                    app.quit()
+                return
+            if t < FADE_IN + 60:
+                self.setWindowOpacity(min(1.0, t / FADE_IN))
+            if t >= END:
+                self.say()
+                if t > END + 200:
+                    return                        # nothing moves any more
+            self.update()
+
+        def say(self):
+            if not self.said:
+                self.said = True
+                try:
+                    sys.stdout.write("bitti\n")
+                    sys.stdout.flush()
+                except (OSError, ValueError, AttributeError):
+                    pass
+
+        def leave(self):
+            if not self.leaving:
+                self.leaving, self.left_at = True, self.now()
+
+        def mousePressEvent(self, ev):  # noqa: N802 - a click skips
+            self.say()
+
+        def bake(self, s):
+            k = self.k
+            q = QPainter(self.board)
+            q.setOpacity(0.5)
+            q.drawPixmap(QPointF(s["r"].x() - s["pad"] + 1.2 * k, s["r"].y() - s["pad"] + 1.6 * k), s["sh"])
+            q.setOpacity(1)
+            q.drawPixmap(s["r"].topLeft(), s["px"])
+            q.end()
+            s["baked"] = True
+
+        def paintEvent(self, ev):  # noqa: N802
+            k, t = self.k, self.now()
+            p = QPainter(self)
+            p.setRenderHint(HINT.SmoothPixmapTransform)
+            p.scale(1 / k, 1 / k)
+            p.drawPixmap(0, 0, self.bg)
+            p.translate(int(MARGIN * k), int(MARGIN * k))
+            air = []
+            for s in order:
+                if s["baked"] or t < s["t0"]:
+                    continue
+                if t > s["t0"] + s["dur"] + SETTLE:
+                    self.bake(s)
+                else:
+                    air.append((s, (t - s["t0"]) / s["dur"]))
+            p.drawPixmap(0, 0, self.board)
+            air.sort(key=lambda a: -a[1])         # the newest stone is the one nearest to us
+            for s, u in air:
+                c = s["r"].center()
+                if u < 1:
+                    h = (1 - u) ** 3              # height above the plate, 1 -> 0
+                    sc = 1 + 0.30 * h
+                else:                             # pressed into place: a tiny dip that springs back
+                    h = 0.0
+                    v = (t - s["t0"] - s["dur"]) / SETTLE
+                    sc = 1 - 0.02 * math.sin(math.pi * min(1.0, v))
+                dx, dy = (c.x() - self.N / 2) * 0.16 * h, (c.y() - self.N / 2) * 0.16 * h
+                alpha = min(1.0, max(0.0, (t - s["t0"]) / 55))
+                for what in (0, 1):
+                    off = (1.2 + 13 * h) * k if what == 0 else 0.0
+                    p.save()
+                    p.translate(c.x() + dx + off, c.y() + dy + off * 1.35)
+                    p.rotate(s["spin"] * h)
+                    p.scale(sc, sc)
+                    if what == 0:
+                        p.setOpacity(alpha * (0.5 - 0.28 * h))
+                        p.drawPixmap(QPointF(-s["r"].width() / 2 - s["pad"], -s["r"].height() / 2 - s["pad"]), s["sh"])
+                    else:
+                        p.setOpacity(alpha)
+                        p.drawPixmap(QPointF(-s["r"].width() / 2, -s["r"].height() / 2), s["px"])
+                    p.restore()
+            land = END - HOLD - FINISH            # the real contact shadows settle in once everything lies
+            if t > land:
+                p.setOpacity(min(1.0, (t - land) / FINISH))
+                p.drawPixmap(0, 0, self.full)
+            p.setOpacity(min(1.0, max(0.0, (t - 500) / 500)))
+            f = QFont("Bahnschrift")
+            f.setPixelSize(int(22 * k))
+            f.setWeight(QFont.Weight.DemiBold)
+            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 7 * k)
+            p.setFont(f)
+            p.setPen(INK)
+            mid = Qt.AlignmentFlag.AlignCenter
+            p.drawText(QRectF(3.5 * k, (SIZE - 2) * k, SIZE * k, 38 * k), mid, "TESSERA")
+            g = QFont("Segoe UI")
+            g.setPixelSize(int(13 * k))
+            p.setFont(g)
+            p.setPen(INK2)
+            p.drawText(QRectF(0, (SIZE + 34) * k, SIZE * k, 24 * k), mid, "taş taş mozaik")
+            p.end()
+            hook = globals().get("_frame_hook")   # tests measure the real pacing here
+            if hook:
+                hook(self, t)
+
+    class Wire(QObject):
+        go = Signal()
+
+    wire = Wire()
+    card = Card()
+    wire.go.connect(card.leave)
+
+    def listen():
+        try:
+            sys.stdin.readline()                  # "kapan", or end of input when the program is gone
+        except (OSError, ValueError, AttributeError):
+            pass
+        wire.go.emit()
+
+    if sys.stdin is not None:
+        threading.Thread(target=listen, daemon=True).start()
+    card.show()
+    app.processEvents()
+    card.clock.start()
+    QTimer.singleShot(30000, app.quit)
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

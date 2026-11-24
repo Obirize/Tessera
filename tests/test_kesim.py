@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import threading
 
 import numpy as np
 import pytest
@@ -125,8 +126,24 @@ def test_preview_is_export_stone_for_stone():
 
 def test_opening_card_comes_before_the_window():
     """The window must not exist on screen until the animation has ended."""
-    src = open(os.path.join("tessera", "acilis.py"), encoding="utf-8").read()
-    assert "played" in src and "show(w)" in src
+    src = open(os.path.join("tessera", "app2.py"), encoding="utf-8").read()
+    body = src[src.index("def reveal("):]
+    assert body.index("card.done.is_set()") < body.index("win.show_initial()")
+    assert "-m tessera.baslat" in open("Tessera.bat", encoding="utf-8").read()
+    from tessera import acilis
+    with open(os.path.join(acilis.DIR, "taslar.json"), encoding="utf-8") as fh:
+        order = acilis.schedule(json.load(fh)["stones"])
+    assert [s["rank"] for s in order] == sorted(s["rank"] for s in order) and order[0]["region"] in ("eye", "pupil")
+    eyes = [s for s in order if s["rank"] == 0]
+    assert max(s["t0"] for s in eyes) < min(s["t0"] for s in order if s["rank"])      # eyes first
+    face = [s["cx"] < 0.5 for s in order if s["rank"] == 3]
+    assert face[0] != face[1]                                                         # left, right, left ...
+    assert acilis.total_ms(order) < 3500
+    h = acilis.Handle.__new__(acilis.Handle)                                          # a dead card never blocks
+    h.done = threading.Event()
+    h.p = type("P", (), {"stdout": iter([])})()
+    h._read()
+    assert h.done.is_set()
     html = open(os.path.join("tessera", "web", "index.html"), encoding="utf-8").read()
     assert 'id="splash"' not in html and "Gelişmiş ayarlar" in html and "İnce ayar" not in html
     assert json.dumps([c["name"] for c in E.style_cards()], ensure_ascii=False) == '["Mozaik", "Kırık taş", "Blok", "İri parça"]'
