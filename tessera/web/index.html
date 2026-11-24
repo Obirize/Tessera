@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tessera</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="tessera_icon.png">
+<script src="qt/qwebchannel.js"></script>
+<script type="importmap">
+{ "imports": {
+    "three": "./vendor/three/build/three.module.js",
+    "three/addons/": "./vendor/three/examples/jsm/"
+} }
+</script>
+</head>
+<body class="empty">
+
+<header id="bar">
+  <div class="bar-l" data-drag><img class="mark" src="tessera_icon.png" alt=""><span class="wordmark">Tessera</span></div>
+  <nav class="views" id="views">
+    <button data-view="wall" class="on">Duvarda</button>
+    <button data-view="table">Masada</button>
+    <button data-view="plates">Tablalar</button>
+    <button data-view="flat">Önizleme</button>
+  </nav>
+  <div class="bar-drag" data-drag></div>
+  <nav class="filemenu">
+    <button id="btn-open" title="Ctrl+O">Aç</button>
+    <button id="btn-save" title="Ctrl+S">Kaydet</button>
+  </nav>
+  <nav class="winbtns">
+    <button id="w-min" title="Simge durumuna küçült"><svg viewBox="0 0 10 10"><path d="M0 5h10"/></svg></button>
+    <button id="w-max" title="Büyüt / küçült"><svg viewBox="0 0 10 10"><path d="M.5 .5h9v9h-9z"/></svg></button>
+    <button id="w-close" title="Kapat"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+  </nav>
+</header>
+
+<aside id="column">
+  <div class="questions">
+    <section class="q" id="q-image">
+      <h2><span class="n">1</span>Hangi görsel?</h2>
+      <div class="pick-empty">
+        <button class="drop" id="btn-pick">
+          <span class="drop-t">Görsel seç</span>
+          <span class="drop-s">ya da dosyayı pencereye sürükle</span>
+        </button>
+        <button class="link small" id="btn-example">Örnek afişle başla</button>
+      </div>
+      <div class="pick-full">
+        <div class="source">
+          <img id="src-thumb" alt="" title="Başka görsel seç">
+          <div class="source-meta">
+            <div class="source-name" id="src-name"></div>
+            <button class="link small muted" id="btn-change">Başka görsel</button>
+          </div>
+          <label class="width" title="Eserin duvardaki genişliği">
+            <span class="field"><input id="in-width" type="number" min="10" max="300" step="1"><span class="unit">cm</span></span>
+            <span class="derived" id="out-height"></span>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <section class="q" id="q-colours">
+      <h2><span class="n">2</span>Hangi renkler?</h2>
+      <div class="spools" id="spools"></div>
+      <div class="chosen" id="chosen"></div>
+      <div class="actions">
+        <button class="link" id="btn-suggest">Bu görsel için öner</button>
+        <button class="link muted" id="btn-library">Makaralarım</button>
+      </div>
+    </section>
+
+    <section class="q" id="q-style">
+      <h2><span class="n">3</span>Nasıl bir doku?</h2>
+      <div class="styles" id="styles"></div>
+      
+    </section>
+
+    <section class="q" id="q-make">
+      <h2><span class="n">4</span>Nasıl basacaksın?</h2>
+      <div class="modes">
+        <button class="mode" data-mode="parca">
+          <span class="mode-t">Tek renk tablalar</span>
+          <span class="mode-k">AMS gerekmez</span>
+          <span class="mode-s">Her taş ayrı ve tek renk. Makara hiç değişmez; taşları kâğıt şablona göre dizersin.</span>
+          <span class="mode-n" id="n-parca">&nbsp;</span>
+        </button>
+        <button class="mode" data-mode="ams">
+          <span class="mode-t">AMS ile çok renkli</span>
+          <span class="mode-k">AMS gerekir</span>
+          <span class="mode-s">Paneller hazır dizilmiş basılır, küçük detaylar taşın içine renkli işlenir. Renk değişiminde filament atılır.</span>
+          <span class="mode-n" id="n-ams">&nbsp;</span>
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <div class="foot">
+    <button class="link drawer-toggle" id="btn-fine">Gelişmiş ayarlar</button>
+    <button class="primary" id="btn-export">Dışa aktar</button>
+    <div class="export-run" id="export-run">
+      <div class="bar"><i id="export-bar"></i></div>
+      <div class="export-msg"><span id="export-msg">Başlıyor</span><button class="link small" id="btn-cancel">Vazgeç</button></div>
+    </div>
+      </div>
+</aside>
+
+<main id="stage">
+  <div id="canvas-host"></div>
+  <div id="busyline"></div>
+  <div class="converting" id="converting">
+    <div class="conv-card">
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="conv-t">Mozaiğe dönüştürülüyor…</div>
+      <div class="conv-p"><span id="conv-pct">0</span>%</div>
+      <div class="conv-bar"><i id="conv-bar"></i></div>
+      <div class="conv-s" id="conv-msg">Görsel okunuyor</div>
+    </div>
+  </div>
+
+  <div class="empty-hint" id="empty-hint">
+    <img class="eh-mark" src="tessera_icon.png" alt="">
+    <p class="eh-t">Görselin burada bir esere dönüşecek.</p>
+    <p class="eh-s">Bir resim sürükle ya da soldan seç.</p>
+  </div>
+
+  <div class="flat" id="flat"><img id="flat-img" alt=""></div>
+
+  <div class="label" id="label">
+    <div class="label-t" id="label-t"></div>
+    <div class="label-s" id="summary"></div>
+  </div>
+
+  <div class="tools" id="tools">
+    <label class="slider"><span>Parçaları ayır</span><input id="in-explode" type="range" min="0" max="1" step="0.01" value="0"></label>
+    <label class="check"><input type="checkbox" id="in-panels"><i></i>Panel sınırları</label>
+  </div>
+
+  <div class="plates-nav" id="plates-nav">
+    <button class="link" id="pl-prev">‹</button>
+    <div class="pl-t" id="pl-t"></div>
+    <button class="link" id="pl-next">›</button>
+    <button class="link small" id="pl-all">Hepsi</button>
+  </div>
+  <div class="plates-wait" id="plates-wait">
+    <p class="eh-t">Tablalar diziliyor</p>
+    <p class="eh-s">Gerçek parçalar hesaplanıyor; bu bir dakika kadar sürebilir. Sen çalışmaya devam edebilirsin.</p>
+  </div>
+
+  <div class="part" id="part">
+    <div class="part-code" id="part-code"></div>
+    <div class="part-colour"><i id="part-sw"></i><span id="part-colour"></span></div>
+    <dl>
+      <dt>Boyut</dt><dd id="part-size"></dd>
+      <dt>Şablon</dt><dd id="part-panel"></dd>
+      <dt>Tabla</dt><dd id="part-plate"></dd>
+    </dl>
+  </div>
+
+  <div class="done" id="done">
+    <p class="done-t">Hazır.</p>
+    <div class="done-lead">
+      <div class="done-h">Montaj şablonu (1:1)</div>
+      <p class="done-how">Şablonu duvara/levhaya bant ile tuttur, taşları kodlarına göre üstüne yapıştır.</p>
+      <div class="done-a"><button class="primary small" id="btn-tpl-a4">Şablonu aç (A4)</button><button class="link small" id="btn-tpl-a3">A3</button></div>
+    </div>
+    <p class="done-s" id="done-s"></p>
+    <div class="done-a"><button class="link small" id="btn-plates-dir">Tabla dosyaları (3MF)</button><button class="link small" id="btn-reveal">Klasörü aç</button><button class="link small" id="btn-done-close">Kapat</button></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+</main>
+
+<aside class="sheet" id="sheet-fine">
+  <header><h3>Gelişmiş ayarlar</h3><button class="link small" id="fine-close">Kapat</button></header>
+  <div class="rows">
+    <h4>Taşlar</h4>
+    <label class="row"><span class="r-t">Taş boyu <b id="f-tas-v"></b></span><input type="range" id="f-tas" min="0.7" max="1.6" step="0.05"><span class="r-e"><i>Küçük, çok taş</i><i>İri, az taş</i></span></label>
+    <label class="row"><span class="r-t">Taşlar arası boşluk <b id="f-derz-v"></b></span><input type="range" id="f-derz" min="0.2" max="1" step="0.1"><span class="r-e"><i>Sıkı</i><i>Aralıklı</i></span></label>
+    <label class="row"><span class="r-t">Taş kalınlığı <b id="f-kalinlik-v"></b></span><input type="range" id="f-kalinlik" min="2" max="6" step="0.2"><span class="r-e"><i>İnce</i><i>Kalın</i></span></label>
+    <div class="row"><button class="link" id="f-tohum">Taşları yeniden diz</button><span class="r-h">Aynı ayarla başka bir diziliş dener.</span></div>
+
+    <h4>Yükseklik</h4>
+    <label class="row"><span class="r-t">Figürler öne çıksın <b id="f-kabartma-v"></b></span><input type="range" id="f-kabartma" min="0" max="3" step="0.2"><span class="r-e"><i>Düz yüzey</i><i>Öne çıkık</i></span></label>
+    <label class="row"><span class="r-t">Taşlar arası yükseklik farkı <b id="f-oynama-v"></b></span><input type="range" id="f-oynama" min="0" max="1" step="0.2"><span class="r-e"><i>Aynı seviye</i><i>Elle dizilmiş gibi</i></span></label>
+
+    <h4>Görsel</h4>
+    <div class="row"><span class="r-t">Önerilecek renk sayısı</span><div class="seg" id="f-renk"><button data-v="2">2</button><button data-v="3">3</button><button data-v="4">4</button><button data-v="5">5</button><button data-v="6">6</button></div></div>
+    <div class="row"><span class="r-t">Noktalı baskıyı düz renge çevir</span><div class="seg" id="f-tram"><button data-v="auto">Otomatik</button><button data-v="true">Hep</button><button data-v="false">Hiç</button></div><span class="r-h">Çizgi roman ve gazete gibi noktalardan oluşan görseller için.</span></div>
+    <label class="row check"><input type="checkbox" id="f-bolge"><i></i><span>Güneş ışınlarını ve figürleri kendisi bulsun</span></label>
+
+    <h4>Baskı</h4>
+    <div class="row only-parca"><span class="r-t">Tablaların sırası</span><div class="seg" id="f-tabla"><button data-v="panel">Şablon sırasıyla</button><button data-v="renk">En az tabla</button></div><span class="r-h">Şablon sırasında, ilk tablalar biter bitmez dizmeye başlayabilirsin.</span></div>
+    <label class="row only-ams"><span class="r-t">Panel boyu <b id="f-panel-v"></b></span><input type="range" id="f-panel" min="150" max="240" step="5"><span class="r-e"><i>Küçük</i><i>Tabla kadar</i></span></label>
+    <div class="row only-ams"><span class="r-t">Panel tabanının rengi</span><div class="seg" id="f-taban"></div></div>
+
+    <h4>Program</h4>
+    <label class="row check"><input type="checkbox" id="f-acilis"><i></i><span>Açılış animasyonu</span></label>
+  </div>
+  <footer><button class="link small muted" id="fine-reset">Hepsini varsayılana döndür</button></footer>
+</aside>
+
+<aside class="sheet wide" id="sheet-lib">
+  <header><h3>Makaralarım</h3><button class="link small" id="lib-close">Tamam</button></header>
+  <p class="sheet-note">Elindeki makaraları işaretle. Renk önerileri yalnızca bunlardan seçilir.</p>
+  <div id="lib"></div>
+</aside>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

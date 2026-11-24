@@ -1,0 +1,86 @@
+{
+ "aciklama": "Özgün konstrüktivist kompozisyon: kırmızı daire, siyah diyagonaller, gri yaylar, soyut çubuklu slogan bandı.",
+ "varsayilan": 5,
+ "isin_merkezi": [
+  0.3467,
+  0.4
+ ],
+ "genislik_mm": 450,
+ "onerilen_ayar": "Logo / Grafik",
+ "palet": [
+  {
+   "ad": "Krem",
+   "rgb": [
+    240,
+    234,
+    220
+   ]
+  },
+  {
+   "ad": "Kırmızı",
+   "rgb": [
+    204,
+    36,
+    40
+   ]
+  },
+  {
+   "ad": "Siyah",
+   "rgb": [
+    24,
+    23,
+    25
+   ]
+  },
+  {
+   "ad": "Beton grisi",
+   "rgb": [
+    128,
+    128,
+    124
+   ]
+  }
+ ],
+ "sekiller": [
+  {
+   "vocab": 0,
+   "circle": [
+    0.3467,
+    0.4,
+    0.2
+   ],
+   "ad": "kirmizi_daire"
+  },
+  {
+   "vocab": 2,
+   "polygon": [
+    [
+     0.0467,
+     0.6095
+    ],
+    [
+     0.6,
+     0.5333
+    ],
+    [
+     0.61,
+     0.6667
+    ],
+    [
+     0.0567,
+     0.7429
+    ]
+   ],
+   "ad": "slogan_bandi"
+  },
+  {
+   "vocab": 0,
+   "circle": [
+    0.7867,
+    1.0,
+    0.2867
+   ],
+   "ad": "gri_yay"
+  }
+ ]
+}

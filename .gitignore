@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+cikti/
+*.3mf
+*.stl
+
+# çalışma notları ve başkalarına ait referans görseller: yalnız bu bilgisayarda
+/arastirma/
+/docs/
+/vitrin/
+/prototip/
+/PLAN.md
+/scripts/*
+!/scripts/donustur.py
+!/scripts/acilis_blender.py
+!/scripts/iterasyon_kedi_ortak.py
+!/scripts/iterasyon_kedi_tasarim.py
+!/scripts/qa_ortak.py
+/ornekler/poster/0*.png
+/ornekler/poster/sayilar.json
+result.json
