@@ -141,7 +141,7 @@ def descreen(img: np.ndarray, mode: DescreenMode = "auto", *, min_area_frac: flo
     if mode is False or mode is None or (isinstance(mode, str) and mode.lower() in ("false", "off", "kapali", "no")):
         return same
     mask, period = screen_map(img)
-    frac = float((mask > 0.5).mean())
+    frac, proven = float((mask > 0.5).mean()), False
     # coarse screens (dots ~6 mm apart): look again at half resolution, where the window holds
     # enough periods; keep whichever reading covers clearly more area
     h, w = img.shape[:2]
@@ -149,13 +149,15 @@ def descreen(img: np.ndarray, mode: DescreenMode = "auto", *, min_area_frac: flo
         half = np.asarray(Image.fromarray(img).resize((w // 2, h // 2), Image.BOX))
         m2, p2 = screen_map(half)
         f2 = float((m2 > 0.5).mean())
-        if p2 > 0 and f2 > max(1.5 * frac, frac + 0.05, 0.0 if mode is True else 0.2) and 2 * p2 <= max_period_px:
+        # (whether it really is a dot screen is judged where it was seen: at half size)
+        if (p2 > 0 and f2 > max(1.5 * frac, frac + 0.05) and 2 * p2 <= max_period_px
+                and (mode != "auto" or is_screen(_lum(half), m2 > 0.5))):
             mask = np.asarray(Image.fromarray(m2).resize((w, h), Image.BILINEAR))
-            period, frac = 2 * p2, f2
+            period, frac, proven = 2 * p2, f2, True
     if period <= 0 or period > max_period_px:
         return same
     L = _lum(img)
-    if mode == "auto" and (frac < min_area_frac or not is_screen(L, mask > 0.5)):
+    if mode == "auto" and (frac < min_area_frac or not (proven or is_screen(L, mask > 0.5))):
         return same
     period = float(np.clip(period, 2.0, max(2.0, max_period_px)))
     sigma = 0.55 * period

@@ -218,6 +218,7 @@ class Bridge(QObject):
         self._scene_cache: dict = {}            # recipe key -> (scene_info, plates_info)
         self._conv_gen = -1                     # generation whose conversion is on screen
         self._await_palette: Optional[int] = None
+        self._old_paints: list = []             # paints of an older project, waiting for its colours
         self._thumb_gens: dict = {}
         self._sig_internal.connect(self._dispatch, Qt.ConnectionType.QueuedConnection)
 
@@ -317,17 +318,27 @@ class Bridge(QObject):
         if gen != self._await_palette:
             return                                   # found for an older picture
         self._await_palette = None
-        colours = E.settle(colours, self.recipe.colours)
-        if len(colours) != len(self.recipe.colours):
-            self.recipe.fine["taban"] = None
+        opened, self._old_paints = self._old_paints, []
+        if opened:
+            colours = E.keep_paints(colours, opened)
         self.recipe.uygun = advice
-        self.recipe.use_colours(colours)
+        self.recipe.use_colours(E.settle(colours, self.recipe.colours))
         self._changed(rebuild=True)
+        if opened:                                   # a project just opened; the user has changed nothing
+            self.dirty = False
+            self._emit_state()
 
     def _ui_error(self, gen, kind, msg):
         if kind == "detect":
+            if gen != self._await_palette:
+                return                               # an older picture's search; nobody waits for it
             self._await_palette = None
-            self._emit_progress(1.0, "")
+            self._old_paints = []
+            if self.recipe.colours:
+                self._changed()                      # go on with the colours that are there
+            else:
+                self._emit_progress(1.0, "")
+                self._emit_state()
         self.failed.emit(json.dumps({"kind": kind, "msg": msg}, ensure_ascii=False))
 
     def _ui_busy(self, on, msg):
@@ -456,6 +467,7 @@ class Bridge(QObject):
 
     def _find_colours(self, msg: str) -> None:
         self.gen += 1
+        self._old_paints = []
         self._await_palette = self.gen
         self._emit_progress(0.0, msg)
         self.engine.detect(self.gen, self.recipe)
@@ -499,15 +511,15 @@ class Bridge(QObject):
                 return
         else:
             return
-        paints = len(E.unique_names(cols))
-        if paints < 2:
+        if len(E.unique_names(cols)) < 2:
             self.toast.emit("En az iki farklı renk kalmalı.")
             self._emit_state()
             return
         if c == self.recipe.colours[i]:
             return
-        if paints != len(self.recipe.palette):
-            self.recipe.fine["taban"] = None          # two colours became one (or one became two)
+        was = self.recipe.colours[i]["hex"].upper()
+        if self.recipe.fine.get("taban") == was and was not in [h for _, h in E.unique_names(cols)]:
+            self.recipe.fine["taban"] = c["hex"].upper()      # the base plate's colour itself was repainted
         self.recipe.use_colours(cols)
         self._changed()
 
@@ -547,6 +559,7 @@ class Bridge(QObject):
     @Slot(str)
     def setFine(self, patch_json: str) -> None:  # noqa: N802
         patch = json.loads(patch_json or "{}")
+        tram = self.recipe.fine.get("tram", "auto")
         changed = False
         for k, v in patch.items():
             if k in E.FINE_DEFAULTS and self.recipe.fine.get(k, E.FINE_DEFAULTS[k]) != v:
@@ -557,13 +570,23 @@ class Bridge(QObject):
                     if not self.recipe.zones_from_file:
                         self.recipe.rays_center = None
         if changed:
-            self._changed()
+            self._fine_changed(tram)
 
     @Slot()
     def resetFine(self) -> None:  # noqa: N802
+        tram = self.recipe.fine.get("tram", "auto")
         keep = {k: self.recipe.fine.get(k, E.FINE_DEFAULTS[k]) for k in ("renk_sayisi", "tur")}
         self.recipe.fine = {**E.FINE_DEFAULTS, **keep}   # the colours have their own place and their own reset
-        self._changed()
+        self._fine_changed(tram)
+
+    def _fine_changed(self, tram) -> None:
+        """tram: the dotted-print setting the colours were found under."""
+        if self.recipe.image_path and self.recipe.fine.get("tram", "auto") != tram:
+            self.dirty = True
+            self._find_colours("Görselin renkleri bulunuyor")
+            self._emit_state()
+        else:
+            self._changed()
 
     # -------------------------------------------------- slots: stage data
     @Slot(result=str)
@@ -708,6 +731,9 @@ class Bridge(QObject):
         r.style = E.style_name(extra.get("stil") or p.preset or E.DEFAULT_STYLE)
         r.fine = {**E.FINE_DEFAULTS, **{k: v for k, v in (extra.get("ince_ayar") or {}).items()
                                          if k in E.FINE_DEFAULTS and not (k == "kafes" and not isinstance(v, bool))}}
+        if isinstance(r.fine["taban"], int):         # saved as a palette position
+            u = E.unique_names(old)
+            r.fine["taban"] = u[r.fine["taban"]][1] if 0 <= r.fine["taban"] < len(u) else None
         r.shapes = p.shapes
         r.rays_center = list(p.rays_center) if p.rays_center else None
         r.zones_from_file = bool(extra.get("bolge_dosyadan", bool(p.shapes)))
@@ -722,10 +748,13 @@ class Bridge(QObject):
         self.scene_info = None
         if r.colours:
             self._await_palette = None
+            self.engine.cancel_detect()
             self._changed(rebuild=True)
         else:                                        # saved before the program knew the picture's colours
-            r.fine["renk_sayisi"] = None
+            paints = list(dict.fromkeys(tuple(int(v) for v in f.rgb) for f in s.palette))
+            r.fine["renk_sayisi"] = len(paints) if len(paints) >= 2 else None
             self._find_colours("Görselin renkleri bulunuyor")
+            self._old_paints = paints if len(paints) >= 2 else []
         self.dirty = False
         self._emit_state()
         return self.project_path

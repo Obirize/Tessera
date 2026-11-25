@@ -23,6 +23,7 @@ from .tiling import _adjacency, split_components
 
 WORK = 1000             # px, the size everything here happens at
 SOFT_ALWAYS_FLAT = 30.0  # up to this share (%) of soft transitions a picture is flat art, no questions asked
+SLOPE_FLAT = 8.0         # ... unless more than this share (%) of it is slow gradients (flat art: below 1)
 MAX_PAINTS = 8
 
 
@@ -32,6 +33,17 @@ def tonal(colours: list) -> bool:
 
 
 # ------------------------------------------------------------------ what kind of picture is it
+def slopes(lab: np.ndarray, rng: np.ndarray) -> float:
+    """Share (%) of the picture where the colour drifts without any edge: a blurred photograph, a sunset.
+    rng: lightness range within 5 px."""
+    drift = np.zeros(rng.shape, bool)
+    lab = blur(lab, 5.0)                             # grain is not a gradient (in the dark its hue swings widely)
+    for size, much in ((31, 5.0), (101, 8.0)):
+        calm = ndi.maximum_filter(rng, size + 36) <= 3.5        # far enough from any edge for the blur, too
+        drift |= calm & (sum(spread_in(lab[..., i], size) ** 2 for i in range(3)) > much ** 2)
+    return 100 * float(drift.mean())
+
+
 def kind(img: np.ndarray, colours) -> tuple:
     """("net" | "cizim" | "ton", softness %). colours: () -> renk.find(img), only asked for when needed.
     net    flat art: posters, logos, vector drawings       -> cut as it is
@@ -43,7 +55,7 @@ def kind(img: np.ndarray, colours) -> tuple:
     rng = spread_in(lab[..., 0], 5)
     soft = 100 * float(((rng > 3.5) & (rng < 25)).mean())
     if soft < SOFT_ALWAYS_FLAT:
-        return "net", soft
+        return "net" if slopes(lab, rng) < SLOPE_FLAT else "ton", soft
     rng = spread_in(ndi.gaussian_filter(lab32(im)[..., 0], 0.7), 5)
     if 100 * float((rng > 25).sum() / max((rng > 3.5).sum(), 1)) < 22:      # hardly a sharp edge anywhere
         return "ton", soft
@@ -194,6 +206,8 @@ def merge_weak(L: np.ndarray, P: np.ndarray, mm: float) -> np.ndarray:
         col = np.zeros(n, int)
         col[lab.ravel()] = L.ravel()
         lo, hi, cnt = _adjacency(lab, n)
+        if not len(lo):                                  # one single shape: nothing to merge
+            break
         x, y, cnt = np.r_[lo, hi], np.r_[hi, lo], np.r_[cnt, cnt]
         d = np.linalg.norm((P[col[x]] - P[col[y]]) * WT, axis=1)
         need = np.clip(9.0 * (46.0 / np.maximum(d, 8.0)) ** 2.1, 9.0, 300.0)      # mm2

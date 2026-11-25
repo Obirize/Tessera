@@ -131,7 +131,7 @@ function colourSeg(sel, key, first) {
   const k = $(sel);
   k.innerHTML = '';
   const cur = S.fine[key] == null ? null : S.fine[key];
-  const opts = [{ v: null, t: first }, ...S.palette.map((n, i) => ({ v: i, t: n, hex: S.hexes[n] }))];
+  const opts = [{ v: null, t: first }, ...S.palette.map((n) => ({ v: S.hexes[n], t: n, hex: S.hexes[n] }))];
   for (const o of opts) {
     const b = document.createElement('button');
     b.innerHTML = (o.hex ? `<span class="sw" style="background:${o.hex}"></span>` : '') + esc(o.t);
@@ -185,7 +185,8 @@ function renderColours() {
   host.innerHTML = '';
   if (openCol != null && openCol >= cs.length) openCol = null;
   $('#found').textContent = !S.image.path ? 'Bir görsel seçince renkleri burada görünür.'
-    : S.finding || !cs.length ? 'Görselin renkleri bulunuyor…'
+    : S.finding ? 'Görselin renkleri bulunuyor…'
+    : !cs.length ? 'Renkler bulunamadı. Baştan bulmayı dene.'
       : (S.uygun && S.uygun.tur === 'ton' ? `Görsel ${cs.length} renge sadeleştirildi.` : S.fine.renk_sayisi ? `Görsel ${cs.length} renge ayrıldı.` : `Görselde ${cs.length} renk var.`) + " Değiştirmek istediğine dokun.";
   cs.forEach((c, i) => {
     const b = document.createElement('button');
@@ -201,7 +202,7 @@ function renderColours() {
   $('#n-cols').textContent = cs.length || '';
   $('#n-less').disabled = S.finding || cs.length <= 2;
   $('#n-more').disabled = S.finding || cs.length >= 12 || !cs.length;
-  $('#btn-recolour').style.visibility = cs.some((c) => c.elle) || S.fine.renk_sayisi ? 'visible' : 'hidden';
+  $('#btn-recolour').style.visibility = !S.finding && (!cs.length || cs.some((c) => c.elle) || S.fine.renk_sayisi) ? 'visible' : 'hidden';
   renderPop();
 }
 function renderPop() {

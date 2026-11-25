@@ -117,20 +117,37 @@ def analyse(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[
 def settle(found: list, previous: list) -> list:
     """Newly found colours as the recipe takes them: one the user had chosen by hand before stays chosen,
     and there are always two different paints."""
-    from .pipeline import renk
-    for c in found:
-        for o in previous:
-            if o.get("elle") and max(abs(a - b) for a, b in zip(c["rgb"], o["rgb"])) < 26:
-                c.update(ad=o["ad"], hex=o["hex"], elle=True)
+    from .pipeline import renk, sade
+    near = sorted((max(abs(a - b) for a, b in zip(c["rgb"], o["rgb"])), i, j)
+                  for i, c in enumerate(found) for j, o in enumerate(previous) if o.get("elle"))
+    given, used = set(), set()
+    for d, i, j in near:                             # each choice goes to the one colour nearest to it
+        if d < 26 and i not in given and j not in used:
+            found[i].update(ad=previous[j]["ad"], hex=previous[j]["hex"], elle=True)
+            given.add(i)
+            used.add(j)
     if len(unique_names(found)) >= 2:
         return found
     if len(found) < 2:                               # a single-colour picture needs a second paint
         name, v = ("Beyaz", 255) if found[0]["hex"].upper() != main_hex("Beyaz") else ("Siyah", 0)
-        return found + [{"rgb": [v] * 3, "pay": 0.0, "oz": [[renk.W_L * v / 2.55, 0.0, 0.0, 0.0]], "ad": name,
-                         "hex": main_hex(name)}]
+        c = {"rgb": [v] * 3, "pay": 0.0, "oz": [[renk.W_L * v / 2.55, 0.0, 0.0, 0.0]], "ad": name, "hex": main_hex(name)}
+        if sade.tonal(found):
+            c.update(yol="ton", oz=renk.paint_lab([(name, main_hex(name))]).tolist())
+        return found + [c]
     for c in found:
         c.pop("elle", None)
     return renk.paint(found)
+
+
+def keep_paints(found: list, paints: list) -> list:
+    """The paints [(r, g, b)] of an older project, each given to the found colour it suits best."""
+    from scipy.optimize import linear_sum_assignment
+    from .pipeline import renk
+    from .pipeline.palette import rgb_to_lab
+    a, b = (rgb_to_lab(np.array(v, np.uint8)) for v in ([c["rgb"] for c in found], paints))
+    for i, j in zip(*linear_sum_assignment(np.linalg.norm(a[:, None] - b[None], axis=2))):
+        found[i].update(ad=renk.name_of(paints[j]), hex=rgb_hex(paints[j]), elle=True)
+    return found
 
 
 def advice(img, native: int, width_mm: float, k: str, kind: str, soft: float) -> dict:
@@ -204,7 +221,7 @@ FINE_DEFAULTS = {
     "kabartma": 0.0,           # figures stand forward by this much, mm
     "oynama": 0.0,             # random height difference between stones, mm
     "panel": 240.0,            # AMS panel size, mm
-    "taban": None,             # AMS base plate colour (palette index; None = most neutral)
+    "taban": None,             # AMS base plate colour (hex of a paint in use; None = most neutral)
     "tur": "auto",             # kind of picture: auto | net (flat art) | ton (photograph, painting)
     "tram": "auto",            # dotted (printed) pictures: auto | True | False
     "otomatik_bolge": True,    # find rays/figures on pictures without zones
@@ -245,12 +262,23 @@ class Recipe:
 
     def use_colours(self, colours: list) -> None:
         self.colours = colours
-        self.palette = [n for n, _ in unique_names(colours)]
+        u = unique_names(colours)
+        self.palette = [n for n, _ in u]
+        if self.fine.get("taban") not in [h for _, h in u]:
+            self.fine["taban"] = None                 # that paint is not used any more
 
     def targets(self) -> list:
         """Palette index of every colour of the picture."""
         u = [h for _, h in unique_names(self.colours)]
         return [u.index(c["hex"].upper()) for c in self.colours]
+
+    def base_index(self) -> Optional[int]:
+        """Palette position of the AMS base plate's colour."""
+        t = (self.fine or {}).get("taban")
+        if isinstance(t, str):
+            u = [h for _, h in unique_names(self.colours)]
+            return u.index(t.upper()) if t.upper() in u else None
+        return int(t) if t is not None and 0 <= int(t) < len(self.palette) else None
 
     def build_key(self, shape_only: bool = False) -> str:
         """shape_only: what decides the stones themselves; giving a colour another paint keeps it."""
@@ -260,6 +288,7 @@ class Recipe:
         if shape_only and self.colours:
             d.pop("palette")
             d["colours"] = [[c["oz"], t] for c, t in zip(self.colours, self.targets())]
+            d["fine"] = {**d["fine"], "taban": self.base_index()}
         h.update(json.dumps(d, sort_keys=True, default=str).encode())
         if self.zone_mask is not None:
             h.update(self.zone_mask.tobytes())
@@ -289,10 +318,7 @@ class Recipe:
         s.panel_max_mm = float(f.get("panel", 240.0))
         s.merge_same_colour = False                   # every stone is its own piece
         s.backing = "yok"
-
-        def idx(v):
-            return int(v) if v is not None and 0 <= int(v) < len(s.palette) else None
-        s.base_colour = idx(f.get("taban"))
+        s.base_colour = self.base_index()
         s.descreen = f.get("tram", "auto")
         s.plate_order = "renk" if f.get("tabla_sirasi") == "renk" else "panel"
         s.seed = int(f.get("tohum", 7))
@@ -552,6 +578,7 @@ class Engine:
         self._build: Optional[tuple] = None      # (gen, recipe)
         self._jobs: list = []                    # low priority: ("thumbs", gen, recipe) ...
         self._stop = False
+        self._gen = -1                           # generation of the running job
         self._image_cache: dict = {}
         self._zones: dict = {}
         self._thumb_cache: dict = {}
@@ -573,9 +600,15 @@ class Engine:
         self._push(("thumbs", gen, r.copy()))
 
     def detect(self, gen: int, r: Recipe) -> None:
-        with self._cv:                                # before anything else that is waiting
+        with self._cv:
             self._jobs = [("detect", gen, r.copy())] + [j for j in self._jobs if j[0] not in ("detect", "thumbs")]
+            self._build = None                        # asked for before this; a new one follows the colours
             self._cv.notify()
+
+    def cancel_detect(self) -> None:
+        """Nobody is waiting for the colours any more (a project brought its own)."""
+        with self._cv:
+            self._jobs = [j for j in self._jobs if j[0] != "detect"]
 
     def advise(self, gen: int, r: Recipe) -> None:
         self._push(("advise", gen, r.copy()))
@@ -592,8 +625,10 @@ class Engine:
         self._t.join(3)
 
     def superseded(self) -> bool:
+        """Whether something newer than the running job is waiting."""
         with self._cv:
-            return self._stop or self._build is not None or any(j[0] == "detect" for j in self._jobs)
+            return (self._stop or self._build is not None
+                    or any(j[0] == "detect" and j[1] > self._gen for j in self._jobs))
 
     def _check(self) -> None:
         if self.superseded():
@@ -607,10 +642,12 @@ class Engine:
                     self._cv.wait()
                 if self._stop:
                     return
-                if self._build is not None:
+                # a colour search comes first: the build that is waiting beside it needs its result anyway
+                if self._build is not None and not (self._jobs and self._jobs[0][0] == "detect"):
                     job, self._build = ("build",) + self._build, None
                 else:
                     job = self._jobs.pop(0)
+                self._gen = job[1] if len(job) > 1 else -1
             try:
                 getattr(self, "_do_" + job[0])(*job[1:])
             except Superseded:
