@@ -89,7 +89,7 @@ function renderNumbers() {
   if (!built) { $('#n-parca').innerHTML = '&nbsp;'; $('#n-ams').innerHTML = '&nbsp;'; return; }
   const p = built.estimates.parca || {}, a = built.estimates.ams || {};
   $('#n-parca').textContent = p.parca != null
-    ? `${fmt0.format(p.parca)} taş · ${p.tabla} tabla · ~${fmt0.format(p.saat)} saat` : '';
+    ? `${fmt0.format(p.parca)} taş · ${p.tabla_kesin ? '' : '~'}${p.tabla} tabla · ~${fmt0.format(p.saat)} saat` : '';
   $('#n-ams').textContent = a.panel != null
     ? `${a.panel} panel · ~${fmt0.format(a.purge_gram)} g atık · ~${fmt0.format(a.saat)} saat` + ((S.palette || []).length > 4 ? ` · ${S.palette.length} renk: ${Math.ceil(S.palette.length / 4)} AMS gerekir` : '') : '';
 }

@@ -121,7 +121,11 @@ def estimate(m: Mosaic, exact: bool = True) -> dict:
     H, W = m.label.shape
     mm = s.mm_per_px
     nx, ny = panel_xy(W * mm, H * mm, s.panel_max_mm)
-    mm_ = mass_model(m, mode)
+    packed = None
+    if exact and mode == Mode.PIECES and m.polys is not None:
+        from .scene import stone_plates
+        packed = sum(n for *_, n in stone_plates(m))      # the same packing the plates view and the export use
+    mm_ = mass_model(m, mode, packed)
     hassas = None
     if mode == Mode.AMS:
         parca = nx * ny          # AMS: each panel is one printed object to assemble
@@ -135,6 +139,7 @@ def estimate(m: Mosaic, exact: bool = True) -> dict:
     return {
         "parca": int(parca),
         "tabla": int(mm_["plates"]),
+        "tabla_kesin": mode == Mode.AMS or packed is not None,
         "gram": int(round(mm_["grams"])),
         "saat": round(mm_["hours"], 1),
         "purge_gram": 0 if mode == Mode.PIECES else int(round(mm_["purge_g"])),

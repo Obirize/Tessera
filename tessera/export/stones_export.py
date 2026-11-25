@@ -233,6 +233,8 @@ def export_stones(m: Mosaic, out_dir: str, prog, created: list) -> dict:
             write_bambu_3mf(path, sub, hi - lo, fil, plate_names=pnames[lo:hi], wipe_tower_xy=wt[lo:hi],
                             prime_tower=not no_tower, title="Tessera çok renkli")
             files.append(path)
+    if pieces and not kafes:
+        mm_ = mass_model(m, mode, len(plates_info))      # now the plates are counted, not guessed
     # split model totals over plates
     totv = sum(p["_vol"] for p in plates_info) or 1.0
     for p in plates_info:

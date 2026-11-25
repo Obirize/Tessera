@@ -151,6 +151,21 @@ def test_opening_card_comes_before_the_window():
     assert json.dumps([c["name"] for c in E.style_cards()], ensure_ascii=False) == '["Mozaik", "Kırık taş", "Blok", "İri parça"]'
 
 
+def test_plate_count_on_screen_is_the_real_one(tmp_path):
+    from tessera.export.api import export_project, plates_glb
+    m = make()
+    for order in ("panel", "renk"):
+        m.settings.plate_order = order
+        e = estimate(m)
+        real = plates_glb(m)[1]["plates"]
+        assert e["tabla"] == len(real) and e["tabla_kesin"]
+        assert sum(p["hours"] for p in real) == pytest.approx(e["saat"], abs=0.4)
+    res = export_project(m, str(tmp_path / "o"))
+    assert len(res["plates"]) == e["tabla"] and res["hours"] == pytest.approx(e["saat"], abs=0.06)
+    rough = estimate(m, exact=False)                                    # the card that is not selected: marked as rough
+    assert not rough["tabla_kesin"] and abs(rough["tabla"] - e["tabla"]) <= 1
+
+
 def test_remembered_colour_areas_change_nothing():
     """Another texture starts from the remembered areas; the stones must be the ones a fresh run gives."""
     from tessera.pipeline import kesim

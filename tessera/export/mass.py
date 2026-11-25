@@ -96,10 +96,11 @@ H_WALL_STYLE = {"freud": 1.0, "mozaik": 1.13, "kirik": 1.13, "blok": 1.13, "iri"
 H_WALL_DEFAULT = 0.82
 H_PER_STONE = 0.0           # per-object overhead (travel, retraction, seams), hours
 STONE_PLATE_FILL = 0.62
+CUT_PLATE_FILL = 0.74        # R8 stones: 147 guessed for 148 packed plates (13 pieces, 25-70 cm)
 AMS_BASE_T = 0.8
 
 
-def mass_model_stones(m: Mosaic, mode: str) -> dict:
+def mass_model_stones(m: Mosaic, mode: str, n_plates=None) -> dict:
     gp = GeoParams()
     s = m.settings
     mm = s.mm_per_px
@@ -133,7 +134,7 @@ def mass_model_stones(m: Mosaic, mode: str) -> dict:
         plates = nx * ny
         swaps = int(round(ams_swaps(m, gp, nx, ny) * SWAP_SCALE))
     else:
-        usable = (s.plate_mm - 2 * gp.plate_margin) ** 2 * STONE_PLATE_FILL
+        usable = (s.plate_mm - 2 * gp.plate_margin) ** 2 * (STONE_PLATE_FILL if m.polys is None else CUT_PLATE_FILL)
         plates = sum(max(1, math.ceil(a / usable)) for a in
                      np.bincount(col, a_eff + per * 1.25, minlength=len(s.palette)) if a > 0)
         if getattr(s, "backing", "yok") == "kafes":
@@ -142,6 +143,8 @@ def mass_model_stones(m: Mosaic, mode: str) -> dict:
                         + art_mm2 * 3 * gp.brace_w / gp.brace_pitch * 0.8)
             backing_g = (floor * gp.backing_t + per.sum() / 2 * gp.rib_w * gp.rib_h) / 1000 * PLA_DENSITY * K_BACKING
             plates += nx * ny + 1
+        elif n_plates is not None:
+            plates = n_plates
     usable_l = s.plate_mm - 2 * gp.plate_margin
     tower = usable_l - (min(w_mm / nx, h_mm / ny) + 10.0) >= 45.0
     purge_g = swaps * (PURGE_G_PER_SWAP if tower else PURGE_G_PER_SWAP_NO_TOWER)
@@ -156,13 +159,14 @@ def mass_model_stones(m: Mosaic, mode: str) -> dict:
             "backing_colour": backing_colour_index(m), "stones": n_st}
 
 
-def mass_model(m: Mosaic, mode: str | None = None) -> dict:
-    """grams, hours, kg/m2 for the whole artwork (fast, raster based)."""
+def mass_model(m: Mosaic, mode: str | None = None, plates: int | None = None) -> dict:
+    """grams, hours, kg/m2 for the whole artwork (fast, raster based). plates: how many single-colour
+    plates the stones really fill, when they have been packed (otherwise it is guessed from their area)."""
     gp = GeoParams()
     s = m.settings
     mode = mode or (s.mode if s.mode in (Mode.PIECES, Mode.AMS) else Mode.PIECES)
     if not s.merge_same_colour:
-        return mass_model_stones(m, mode)
+        return mass_model_stones(m, mode, plates)
     mm = s.mm_per_px
     H, W = m.label.shape
     w_mm, h_mm = W * mm, H * mm

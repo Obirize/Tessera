@@ -50,8 +50,8 @@ def _key(m: Mosaic, what: str, quality: str = "") -> tuple:
 
 
 def _remember(key, value):
-    if len(_CACHE) > 6:
-        _CACHE.clear()
+    while len(_CACHE) > 7:                # the oldest goes, not what was made a moment ago for the same piece
+        _CACHE.pop(next(iter(_CACHE)))
     _CACHE[key] = value
     return value
 
@@ -561,10 +561,33 @@ def scene_glb_stones(m: Mosaic, quality: str = "preview", progress=None):
     return glb, meta
 
 
+def stone_plates(m: Mosaic) -> list:
+    """The single-colour plates as exported: [(colour, stones, placements, number of plates)]."""
+    from ..geometry.packing import pack_outlines
+    from ..geometry.stones import side_transform, stone_arrays
+    s = m.settings
+    key = _key(m, f"stone_plates {s.plate_mm}")
+    if key in _CACHE:
+        return _CACHE[key]
+    L = _stone_layout(m)
+
+    def foot(st):
+        if not st.side:
+            return st.poly
+        return shapely.MultiPoint((stone_arrays(st)[0] @ side_transform(st)[:3, :3].T)[:, :2]).convex_hull
+    out = []
+    for ci in range(len(s.palette)):
+        items = sorted([st for st in L.stones if st.colour == ci], key=lambda st: (st.page, st.panel, st.number))
+        if items:
+            groups = [st.page for st in items] if getattr(s, "plate_order", "panel") not in ("max", "renk") else None
+            pl, n, _ = pack_outlines([foot(st) for st in items], s.plate_mm, L.params.plate_margin, 2.5, groups=groups)
+            out.append((ci, items, pl, n))
+    return _remember(key, out)
+
+
 def plates_glb_stones(m: Mosaic, gap_mm: float = 40.0, progress=None):
     """Plates exactly as exported (same footprints, same packing, same order)."""
     from ..geometry.layout import ascii_name
-    from ..geometry.packing import pack_outlines
     from ..geometry.stones import side_transform
     from .mass import mass_model
     t0 = time.time()
@@ -573,7 +596,6 @@ def plates_glb_stones(m: Mosaic, gap_mm: float = 40.0, progress=None):
     meshes = _stone_meshes(m, L, "preview", progress)
     gp = L.params
     P = s.plate_mm
-    order = getattr(s, "plate_order", "panel")
     beds = []
     if L.mode == Mode.PIECES:
         printed = []
@@ -582,21 +604,13 @@ def plates_glb_stones(m: Mosaic, gap_mm: float = 40.0, progress=None):
                 M = side_transform(st)
                 V = V @ M[:3, :3].T
                 V[:, 2] -= V[:, 2].min()
-                foot = shapely.MultiPoint(V[:, :2]).convex_hull
-            else:
-                foot = st.poly
-            printed.append((V, T, foot))
-        for ci, f in enumerate(s.palette):
-            items = sorted([st for st in L.stones if st.colour == ci], key=lambda st: (st.page, st.panel, st.number))
-            if not items:
-                continue
-            groups = [st.page for st in items] if order not in ("max", "renk") else None
-            pl, n_pl, _ = pack_outlines([printed[st.index][2] for st in items], P, gp.plate_margin, 2.5,
-                                        groups=groups)
+            printed.append((V, T))
+        for ci, items, pl, n_pl in stone_plates(m):
+            f = s.palette[ci]
             content = [[] for _ in range(n_pl)]
             for q in pl:
                 st = items[q.item]
-                V, T, _ = printed[st.index]
+                V, T = printed[st.index]
                 a = math.radians(q.angle)
                 VV = V.copy()
                 VV[:, 0] = V[:, 0] * math.cos(a) - V[:, 1] * math.sin(a) + q.dx
@@ -615,7 +629,7 @@ def plates_glb_stones(m: Mosaic, gap_mm: float = 40.0, progress=None):
                 items.append((f"stone:{L.stones[i].code}", V + off + (0, 0, 0.8), T, L.stones[i].colour,
                               L.stones[i].code))
             beds.append((f"Panel {pn.name}", None, items, "AMS_paneller.3mf"))
-    mmod = mass_model(m)
+    mmod = mass_model(m, plates=len(beds))
     cols = max(1, math.ceil(math.sqrt(len(beds))))
     stride = P + gap_mm
     mats = [(f.name, f.rgb) for f in s.palette] + [("tabla", (58, 58, 62))]
