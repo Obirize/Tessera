@@ -141,6 +141,16 @@ def test_advice_is_shown_and_the_kind_can_be_switched(qapp, bridge, tmp_path):
     assert 'id="fit"' in html
 
 
+def test_one_preview_and_the_plates():
+    html = open(os.path.join(app2.WEB_DIR, "index.html"), encoding="utf-8").read()
+    import re
+    nav = re.search(r'<nav class="views".*?</nav>', html, re.S).group(0)
+    assert re.findall(r">([^<>]+)</button>", nav) == ["Önizleme", "Tablalar"]
+    for f in ("app.js", "stage.js", "style.css"):
+        src = open(os.path.join(app2.WEB_DIR, f), encoding="utf-8").read()
+        assert "view-wall" not in src and "view-flat" not in src and "=== 'wall'" not in src and "'flat'" not in src, f
+
+
 def test_same_paint_twice_is_one_colour():
     cols = [{"rgb": [0, 0, 0], "pay": .5, "oz": [[0, 0, 0, 0]], "ad": "Siyah", "hex": "#1B1B1D"},
             {"rgb": [9, 9, 9], "pay": .3, "oz": [[2, 0, 0, 0]], "ad": "Siyah", "hex": "#1b1b1d"},

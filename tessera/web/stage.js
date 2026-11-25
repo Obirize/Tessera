@@ -1,4 +1,4 @@
-// Tessera 3D stage: the artwork as a real object on a wall or a table, the build plates,
+// Tessera 3D stage: the finished piece on a plain wall, the build plates on a table,
 // exploded view, part picking. Units are millimetres throughout.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -37,7 +37,7 @@ export class Stage {
     this.host = host;
     this.onPick = onPick || (() => {});
     this.onReady = onReady || (() => {});
-    this.view = 'wall';
+    this.view = 'art';
     this.explode = 0;
     this.showLattice = true;
     this.showPanels = false;
@@ -254,14 +254,11 @@ export class Stage {
 
   _layout() {
     const [w, h] = this.size;
-    const onWall = this.view === 'wall';
     const plates = this.view === 'plates';
-    this.art.visible = !plates;
-    this.platesGroup.visible = plates;
-    this.wall.visible = onWall;
-    this.table.visible = !onWall;
-    this.scene.background.set(onWall ? 0xe6e0d5 : 0xd9cdb9);
-    if (onWall) {
+    this.art.visible = this.wall.visible = !plates;
+    this.platesGroup.visible = this.table.visible = plates;
+    this.scene.background.set(plates ? 0xd9cdb9 : 0xe6e0d5);
+    if (!plates) {
       this.art.rotation.set(0, 0, 0);
       this.art.position.set(-w / 2, -h / 2, 0);
       // stones are glued straight onto the wall (R6-2); with cleats/backing the wall sits behind them
@@ -273,12 +270,8 @@ export class Stage {
         }
       });
       this.wall.position.set(0, 0, zmin - 0.05);
-    } else {
-      this.art.rotation.set(-Math.PI / 2, 0, 0);
-      this.art.position.set(-w / 2, 0.6, h / 2);
-      this.table.position.set(0, 0, 0);
     }
-    this.content.traverse((o) => { if (o.isMesh && o.userData.kind === 'cleat') o.visible = onWall && this.explode > 0.02; });
+    this.content.traverse((o) => { if (o.isMesh && o.userData.kind === 'cleat') o.visible = this.explode > 0.02; });
   }
 
   frame(instant = false) {
@@ -297,16 +290,9 @@ export class Stage {
       dist = fit(sz.x, sz.z, 1.25);
       dir = new THREE.Vector3(0, 1.0, 0.62).normalize();
     } else {
-      const [w, h] = this.size;
-      if (this.view === 'wall') {
-        center = new THREE.Vector3(0, 0, 0);
-        dist = fit(w, h, 1.32);
-        dir = new THREE.Vector3(0.2, 0.04, 1).normalize();
-      } else {
-        center = new THREE.Vector3(0, 0, 0);
-        dist = fit(w, h * 0.72, 1.35);
-        dir = new THREE.Vector3(-0.28, 0.82, 0.62).normalize();
-      }
+      center = new THREE.Vector3(0, 0, 0);
+      dist = fit(...this.size, 1.32);
+      dir = new THREE.Vector3(0, 0, 1);          // straight on; dragging turns it
     }
     const pos = center.clone().add(dir.multiplyScalar(dist));
     if (instant) {
@@ -330,7 +316,7 @@ export class Stage {
     const local = new THREE.Vector3(Math.cos(a) * Math.cos(e), -Math.sin(a) * Math.cos(e), Math.sin(e));
     let dir = local.clone();
     let target = new THREE.Vector3(0, 0, 0);
-    if (this.view === 'table' || this.view === 'plates') dir = new THREE.Vector3(local.x, local.z, -local.y);
+    if (this.view === 'plates') dir = new THREE.Vector3(local.x, local.z, -local.y);
     if (this.view === 'plates' && this.platesBox) target = this.platesBox.getCenter(new THREE.Vector3());
     const span = this.view === 'plates' && this.platesBox ? this.platesBox.getSize(new THREE.Vector3()).length()
       : Math.hypot(...this.size);
@@ -354,13 +340,13 @@ export class Stage {
       if (o === this.selected) o.position.z += 4;
     });
     this.panelLines.position.z = 30 * k;
-    this.content.traverse((o) => { if (o.isMesh && o.userData.kind === 'cleat') o.visible = this.view === 'wall' && t > 0.02; });
+    this.content.traverse((o) => { if (o.isMesh && o.userData.kind === 'cleat') o.visible = t > 0.02; });
     this.needs = true;
   }
 
   // lifting parts towards a camera that looks straight at them shows nothing: turn to 3/4 first
   obliqueIfFrontal() {
-    if (this.view !== 'wall' || this._anim) return;
+    if (this.view === 'plates' || this._anim) return;
     const cam = this.camera, ctl = this.controls;
     const off = cam.position.clone().sub(ctl.target);
     const dist = off.length();

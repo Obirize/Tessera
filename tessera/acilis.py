@@ -22,39 +22,29 @@ DIR = os.path.join(HERE, "web", "acilis")
 SIZE, TEXT_H, MARGIN = 440, 86, 30        # card, px
 # timeline, ms
 FADE_IN = 200
-EYES_AT, EYE_GAP, EYE_FLIGHT = 240, 80, 480
-REST_AT, GAP_FIRST, GAP_LAST, FLIGHT = 900, 54, 30, 380
+EYES_AT, EYE_GAP, EYE_FLIGHT = 220, 70, 420
+REST_AT, GAP, FLIGHT = 470, 46, 380       # the round starts while the eyes are still landing: no pause
 SETTLE, FINISH, HOLD = 140, 180, 260
-RANK = {"pupil": 0, "eye": 0, "nose": 1, "face": 2, "ear_in": 3, "ear": 4, "ruff": 5, "bg": 6}
 
 
 def schedule(stones: list) -> list:
-    """Start time and flight of every stone. Eyes together; then one stone after another, always
-    alternating left and right, so the face grows evenly from the middle."""
+    """Start time and flight of every stone. Eyes together; then one round clockwise from the top,
+    like a loading ring."""
     for s in stones:
         xs, ys = [p[0] for p in s["pts"]], [p[1] for p in s["pts"]]
         s["cx"], s["cy"] = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
-        s["rank"] = RANK.get(s["region"], 5)
-    eyes = sorted((s for s in stones if s["rank"] == 0), key=lambda s: -abs(s["cx"] - 0.5))
+        s["eye"] = s["region"] in ("eye", "pupil")
+        # 0 at twelve o'clock, growing clockwise; a stone right at the top opens the round
+        s["turn"] = math.degrees(math.atan2(s["cx"] - 0.5, 0.5 - s["cy"])) % 360
+        if s["turn"] > 358:
+            s["turn"] = 0.0
+    eyes = sorted((s for s in stones if s["eye"]), key=lambda s: -abs(s["cx"] - 0.5))
     for i, s in enumerate(eyes):                  # outer halves of both eyes, then the inner ones
         s["t0"], s["dur"] = EYES_AT + (i // 2) * EYE_GAP, EYE_FLIGHT
-    rest = []
-    for rank in sorted({s["rank"] for s in stones} - {0}):
-        grp = [s for s in stones if s["rank"] == rank]
-        sign = -1 if rank in (3, 4, 6) else 1     # ears and ground from the bottom up, the rest downwards
-        left = sorted((s for s in grp if s["cx"] < 0.495), key=lambda s: sign * s["cy"])
-        right = sorted((s for s in grp if s["cx"] > 0.505), key=lambda s: sign * s["cy"])
-        mid = [s for s in grp if 0.495 <= s["cx"] <= 0.505]
-        if rank != 5:
-            rest += mid
-        for a in range(max(len(left), len(right))):
-            rest += left[a:a + 1] + right[a:a + 1]
-        if rank == 5:                             # the collar closes at the bottom middle
-            rest += mid
-    t = float(REST_AT)
+    rest = sorted((s for s in stones if not s["eye"]),
+                  key=lambda s: (s["turn"], math.hypot(s["cx"] - 0.5, s["cy"] - 0.5)))
     for i, s in enumerate(rest):
-        s["t0"], s["dur"] = t, FLIGHT
-        t += GAP_FIRST + (GAP_LAST - GAP_FIRST) * i / max(len(rest) - 1, 1)
+        s["t0"], s["dur"] = REST_AT + i * GAP, FLIGHT
     return eyes + rest
 
 
@@ -185,7 +175,7 @@ def main() -> int:
                 s["pad"] = pad = int(14 * k)
                 s["sh"] = QPixmap.fromImage(blurred(path_of(s["pts"], r.x(), r.y()), r.width(), r.height(), pad,
                                                     int(5 * k), 150))
-                s["spin"] = (7.0 if s["cx"] < 0.5 else -7.0) * (0.6 if s["rank"] == 0 else 1.0)
+                s["spin"] = (7.0 if s["cx"] < 0.5 else -7.0) * (0.6 if s["eye"] else 1.0)
                 s["baked"] = False
             self.clock = QElapsedTimer()
             self.said = self.leaving = False

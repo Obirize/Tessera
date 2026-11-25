@@ -133,11 +133,13 @@ def test_opening_card_comes_before_the_window():
     from tessera import acilis
     with open(os.path.join(acilis.DIR, "taslar.json"), encoding="utf-8") as fh:
         order = acilis.schedule(json.load(fh)["stones"])
-    assert [s["rank"] for s in order] == sorted(s["rank"] for s in order) and order[0]["region"] in ("eye", "pupil")
-    eyes = [s for s in order if s["rank"] == 0]
-    assert max(s["t0"] for s in eyes) < min(s["t0"] for s in order if s["rank"])      # eyes first
-    face = [s["cx"] < 0.5 for s in order if s["rank"] == 3]
-    assert face[0] != face[1]                                                         # left, right, left ...
+    eyes, rest = [s for s in order if s["eye"]], [s for s in order if not s["eye"]]
+    assert eyes and max(s["t0"] for s in eyes) < min(s["t0"] for s in rest)            # eyes first
+    assert min(s["t0"] for s in rest) < min(s["t0"] + s["dur"] for s in eyes)          # and no pause after them
+    turn = [s["turn"] for s in rest]
+    assert turn == sorted(turn) and turn[0] < 20 and turn[-1] > 330                    # one round, clockwise from the top
+    gaps = {round(b["t0"] - a["t0"]) for a, b in zip(rest, rest[1:])}
+    assert len(gaps) == 1                                                              # at an even pace
     assert acilis.total_ms(order) < 3500
     h = acilis.Handle.__new__(acilis.Handle)                                          # a dead card never blocks
     h.done = threading.Event()

@@ -10,7 +10,7 @@ const body = document.body;
 let py = null;
 let S = null;                 // state from Python
 let built = null;             // last numbers
-let view = 'wall';
+let view = 'art';              // 'art': the finished piece, 'plates': the build plates
 let plateIdx = null;
 let toastTimer = null;
 
@@ -233,9 +233,7 @@ function renderPop() {
 function setView(v) {
   view = v;
   for (const b of $$('#views button')) b.classList.toggle('on', b.dataset.view === v);
-  body.classList.remove('view-wall', 'view-table', 'view-plates', 'view-flat');
-  body.classList.add('view-' + v);
-  if (v === 'flat') { loadFlat(); return; }
+  body.classList.toggle('view-plates', v === 'plates');
   if (v === 'plates') {
     showPart(null);
     stage.select(null, true);
@@ -244,7 +242,7 @@ function setView(v) {
   stage.setView(v);
 }
 
-let flatTimer = null;
+let flatTimer = null;             // the flat picture stands in where 3D cannot run
 function loadFlat() {
   clearTimeout(flatTimer);
   flatTimer = setTimeout(async () => {
@@ -380,7 +378,7 @@ function connect() {
   py.built.connect((j) => {
     built = JSON.parse(j);
     renderNumbers(); renderLabel();
-    if (view === 'flat') loadFlat();
+    if (body.classList.contains('no3d')) loadFlat();
   });
   py.scene.connect(async (j) => {
     const s = JSON.parse(j);
@@ -475,7 +473,7 @@ new QWebChannel(qt.webChannelTransport, async (ch) => {
   py = ch.objects.py;
   connect();
   S = JSON.parse(await call('getState'));
-  if (body.classList.contains('no3d')) { setView('flat'); toast('3D görünüm bu bilgisayarda açılamadı; ışıklı önizleme gösteriliyor.', true); }
+  if (body.classList.contains('no3d')) { loadFlat(); toast('3D görünüm bu bilgisayarda açılamadı; düz önizleme gösteriliyor.', true); }
   render();
   const sc = await call('getSceneGLB');
   if (sc) { const s = JSON.parse(sc); stage.loadScene(s.url, s.meta); }

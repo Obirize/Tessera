@@ -591,8 +591,7 @@ class Bridge(QObject):
     # -------------------------------------------------- slots: stage data
     @Slot(result=str)
     def getPreview(self) -> str:  # noqa: N802
-        """Flat relit render (PNG data URL) of the current mosaic for the 2D 'Önizleme' (the one
-        fixed light)."""
+        """Flat render (PNG data URL) of the current mosaic, shown where 3D cannot run."""
         if self.mosaic is None:
             return ""
         return E.data_url(E.preview_png(self.mosaic, E.LIGHT_AZ, E.LIGHT_EL))
