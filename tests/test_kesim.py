@@ -118,7 +118,7 @@ def test_scene_estimate_and_preview(mosaics):
 
 def test_preview_is_export_stone_for_stone():
     r = E.Recipe(image_path=os.path.join("ornekler", "portre", "kaynak.png"), width_mm=200,
-                 palette=["Siyah", "Kırmızı", "Yeşim Beyazı"])
+                 palette=["Siyah", "Kırmızı", "Beyaz"])
     assert r.settings(True).mm_per_px == r.settings(False).mm_per_px
     s = r.settings()
     assert (s.style, s.gap_mm, s.backing, s.merge_same_colour) == ("mozaik", 0.4, "yok", False)

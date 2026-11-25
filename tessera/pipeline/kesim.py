@@ -44,36 +44,19 @@ def _lab(rgb):
 
 
 def image_colours(img: np.ndarray, pal: np.ndarray):
-    """The picture's own flat colours and the filament each one becomes (distinct when possible)."""
-    from .palette import auto_palette
-    k = len(pal)
-    cen = np.array([f.rgb for f in auto_palette(img, k)], np.float32)
-    cost = np.linalg.norm(_lab(cen)[:, None] - _lab(pal)[None], axis=2)
+    """The picture's own colours and the palette colour each one becomes (distinct when possible)."""
+    from . import renk
+    found = renk.find(img)
+    if len(found) > len(pal):
+        found = renk.find(img, len(pal))
+    rgb = np.array([c["rgb"] for c in found])
+    cost = np.linalg.norm(_lab(rgb)[:, None] - _lab(pal)[None], axis=2)
     to = cost.argmin(1)
-    if len(cen) <= k:
+    if len(found) <= len(pal):
         r, c = linear_sum_assignment(cost)
-        to = np.empty(len(cen), int)
+        to = np.empty(len(found), int)
         to[r] = c
-    return cen, to
-
-
-def classify(img: np.ndarray, cen: np.ndarray) -> np.ndarray:
-    """Edge (blended) pixels choose only between colours that really lie next to them: no halos."""
-    n = len(cen)
-    d = np.empty((n,) + img.shape[:2], np.float32)
-    for c in range(n):
-        df = img - cen[c]
-        d[c] = np.sqrt((df * df).sum(-1))
-    best = d.argmin(0).astype(np.int16)
-    sure = d.min(0) < 48
-    edge_d = np.full(img.shape[:2], 1e9, np.float32)
-    edge = best.copy()
-    for c in range(n):
-        near = ndi.maximum_filter((sure & (best == c)).view(np.uint8), size=9) > 0
-        v = np.where(near, d[c], 1e9)
-        m = v < edge_d
-        edge[m], edge_d[m] = c, v[m]
-    return np.where(sure, best, edge)
+    return found, to
 
 
 def drop_specks(lab: np.ndarray, n: int, min_px: float) -> np.ndarray:
@@ -369,23 +352,42 @@ def _parts(g):
 
 # ------------------------------------------------------------------ the whole thing
 def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik", zone=None, centre=None,
-          gap=0.4, size=1.0, seed=7, ams=False, report=None) -> dict:
+          gap=0.4, size=1.0, seed=7, ams=False, report=None, colours=None, to=None, zoom=1.0,
+          labels=None) -> dict:
     """img: source picture (uint8, any resolution). zone/centre: Vocab map (any resolution) and ray
-    centre as 0..1 fractions."""
+    centre as 0..1 fractions. colours/to: the picture's colours (renk.find) and the palette index of
+    each; found here when missing. zoom: > 1 when img is only a part of the picture. labels: index map
+    into colours when it is already known."""
+    from . import renk
     report = report or (lambda f, m: None)
     rng = np.random.default_rng(seed)
     res = resolution(width_mm)
     W = int(round(width_mm / res))
     H = max(8, int(round(img.shape[0] * W / img.shape[1])))
     res = width_mm / W
-    im = np.asarray(Image.fromarray(img).resize((W, H), Image.BICUBIC if W >= img.shape[1] else Image.BOX), np.float32)
     report(0.03, "Renkler ayrılıyor")
-    cen, to = image_colours(img, pal)
-    im = np.stack([ndi.gaussian_filter(im[..., i], 0.8, truncate=2.5) for i in range(3)], -1)
-    lab = to[classify(im, cen)].astype(np.int16)
+    if colours is None:
+        colours, to = image_colours(img, pal)
+    im = None
+    if labels is not None:
+        lab = np.asarray(labels)
+    elif colours[0].get("yol") == "ton":
+        from . import sade
+        lab = sade.label(img, colours, width_mm)
+    else:
+        cw = int(min(W, np.clip(img.shape[1], 900 / zoom, 1500 / zoom)))
+        ch = max(8, int(round(H * cw / W)))
+        im = np.asarray(Image.fromarray(img).resize((cw, ch), Image.BICUBIC if cw >= img.shape[1] else Image.BOX))
+        lab = renk.label(im, colours, cw * zoom)
+    report(0.12, "Renkler ayrılıyor")
+    lab = np.asarray(to)[renk.enlarge(lab, len(colours), (W, H))].astype(np.int16)
     del im
     n = len(pal)
-    lum = pal @ np.array([.3, .59, .11])
+    # the picture's own lightness (not the chosen paint) decides the order, so repainting moves no stone
+    lum = np.zeros(n)
+    for i in range(n):
+        own = [c["rgb"] for c, t in zip(colours, to) if t == i]
+        lum[i] = np.mean(own or [pal[i]], axis=0) @ np.array([.3, .59, .11])
     lab = drop_specks(lab, n, 0.8 / res ** 2)
     lab = widen_thin(lab, [int(i) for i in np.argsort(np.abs(lum - 128))], res)
     lab = drop_specks(lab, n, MIN_A / res ** 2)

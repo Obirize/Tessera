@@ -365,11 +365,11 @@ def test_invalid_input_errors_are_turkish():
     img, _ = _line_art(80, 60)
     with pytest.raises(ValueError, match="taş tipi"):
         build_mosaic(img, _settings(), np.full(img.shape[:2], 9, np.int32))
-    with pytest.raises(ValueError, match="filament"):
+    with pytest.raises(ValueError, match="En az 2"):
         build_mosaic(img, _settings(palette=[RED]))
     s = _settings()
     s.palette = []
-    with pytest.raises(ValueError, match="filament"):
+    with pytest.raises(ValueError, match="En az 2"):
         build_mosaic(img, s)
 
 

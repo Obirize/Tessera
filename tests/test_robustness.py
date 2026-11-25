@@ -104,7 +104,7 @@ def test_width_300cm_preview_under_budget(tmp_path):
 def test_one_colour_palette_gives_turkish_error(tmp_path):
     p = tmp_path / "a.png"
     art(200, 260).save(p)
-    with pytest.raises(ValueError, match="filament"):
+    with pytest.raises(ValueError, match="En az 2"):
         build(p, [RED])
 
 

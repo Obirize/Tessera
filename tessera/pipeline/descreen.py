@@ -104,6 +104,31 @@ def _isolated(line: np.ndarray, arg: np.ndarray, period: float) -> np.ndarray:
     return keep
 
 
+def is_screen(L: np.ndarray, mask: np.ndarray, n: int = 64) -> bool:
+    """A printed dot screen is strictly periodic: in (almost) every window one frequency stands out.
+    Brush strokes, canvas, fur, stone and pen hatching are busy too, but not periodic."""
+    H, W = L.shape
+    n = min(n, H // 4, W // 4)
+    if n < 16:
+        return True
+    at = [(y, x) for y in range(0, H - n + 1, n // 2) for x in range(0, W - n + 1, n // 2)
+          if mask[y:y + n, x:x + n].mean() > 0.7]
+    if len(at) < 4:
+        return False
+    if len(at) > 400:
+        at = [at[i] for i in np.linspace(0, len(at) - 1, 400).astype(int)]
+    w = np.stack([L[y:y + n, x:x + n] for y, x in at]).astype(np.float32)
+    lo, hi = np.percentile(w, 4, axis=(1, 2))[:, None, None], np.percentile(w, 96, axis=(1, 2))[:, None, None]
+    t = (w - lo) / np.maximum(hi - lo, 1e-3)
+    middle = float(np.median(((t > 0.3) & (t < 0.7)).mean((1, 2))))      # ink and paper: little in between
+    w = w - w.mean((1, 2), keepdims=True)
+    P = np.abs(np.fft.rfft2(w * np.hanning(n)[:, None] * np.hanning(n))) ** 2
+    r = np.hypot(np.fft.fftfreq(n)[:, None], np.fft.rfftfreq(n)[None])
+    P = (P * ((r > 0.05) & (r < 0.48))).reshape(len(P), -1)
+    share = float(np.median(P.max(1) / np.maximum(P.sum(1), 1e-6)))
+    return share > 0.06 or (share > 0.047 and middle < 0.2)
+
+
 def descreen(img: np.ndarray, mode: DescreenMode = "auto", *, min_area_frac: float = 0.004,
              max_period_px: float = 16.0, return_mask: bool = False):
     """Low-pass halftone areas of ``img`` (uint8 RGB or grey). ``mode``: "auto" (only when a
@@ -123,10 +148,12 @@ def descreen(img: np.ndarray, mode: DescreenMode = "auto", *, min_area_frac: flo
         half = np.asarray(Image.fromarray(img).resize((w // 2, h // 2), Image.BOX))
         m2, p2 = screen_map(half)
         f2 = float((m2 > 0.5).mean())
-        if p2 > 0 and f2 > max(1.5 * frac, frac + 0.05) and 2 * p2 <= max_period_px:
+        if p2 > 0 and f2 > max(1.5 * frac, frac + 0.05, 0.0 if mode is True else 0.2) and 2 * p2 <= max_period_px:
             mask = np.asarray(Image.fromarray(m2).resize((w, h), Image.BILINEAR))
             period, frac = 2 * p2, f2
     if period <= 0 or period > max_period_px or (mode == "auto" and frac < min_area_frac):
+        return (img, np.zeros(img.shape[:2], np.float32)) if return_mask else img
+    if mode == "auto" and not is_screen(_lum(img), mask > 0.5):
         return (img, np.zeros(img.shape[:2], np.float32)) if return_mask else img
     period = float(np.clip(period, 2.0, max(2.0, max_period_px)))
     sigma = 0.55 * period

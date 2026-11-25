@@ -34,7 +34,6 @@ def qapp():
 @pytest.fixture()
 def store(tmp_path):
     s = QSettings(str(tmp_path / "t.ini"), QSettings.Format.IniFormat)
-    s.setValue("owned", ["Siyah", "Kırmızı", "Fildişi Beyazı", "Altın"])
     return s
 
 
@@ -65,9 +64,9 @@ def test_style_cards_are_the_four_stone_styles():
 
 
 def test_recipe_settings_r6():
-    r = E.Recipe(image_path=POSTER, palette=["Siyah", "Kırmızı", "Fildişi Beyazı"], style="Kırık taş")
+    r = E.Recipe(image_path=POSTER, palette=["Siyah", "Kırmızı", "Beyaz"], style="Kırık taş")
     s = r.settings()
-    assert [f.name for f in s.palette] == ["Siyah", "Kırmızı", "Fildişi Beyazı"]
+    assert [(f.name, f.hex) for f in s.palette] == [("Siyah", "#1B1B1D"), ("Kırmızı", "#C5221F"), ("Beyaz", "#F3F1EC")]
     assert s.style == "kirik"
     assert s.merge_same_colour is False and s.backing == "yok"        # every stone separate, no backing
     assert s.gap_mm == pytest.approx(0.4)
@@ -101,25 +100,62 @@ def bridge(qapp, store):
 def test_bridge_empty_state(bridge):
     st = json.loads(bridge.getState())
     assert st["image"]["path"] == "" and st["palette"] == []
-    assert [s["name"] for s in st["spools"]] == ["Siyah", "Kırmızı", "Fildişi Beyazı", "Altın"]
-    # plain colour words on screen; the product name stays for tooltips and files
-    assert [s["label"] for s in st["spools"]] == ["Siyah", "Kırmızı", "Beyaz", "Altın"]
+    assert st["colours"] == [] and len(st["main"]) == 28              # plain main colours, no spool list
+    assert not {"spools", "library", "labels"} & set(st)
+    assert not any(hasattr(bridge, n) for n in ("setOwned", "setPalette", "suggestPalette"))
     assert st["mode"] == "parca" and st["style"] == "Mozaik"
     assert "light" not in st and not hasattr(bridge, "setLight")      # no light controls any more
     assert bridge.getSceneGLB() == "" and bridge.getPreview() == ""
 
 
-def test_plain_colour_names():
-    lib = [e["ad"] for e in E.library()]
-    words = {E.plain_name(n) for n in lib}
-    assert words <= {"Beyaz", "Siyah", "Gri", "Açık gri", "Koyu gri", "Gümüş", "Kırmızı", "Bordo", "Kiremit",
-                     "Pembe", "Açık pembe", "Turuncu", "Sarı", "Altın", "Yeşil", "Açık yeşil", "Koyu yeşil", "Haki",
-                     "Mavi", "Açık mavi", "Lacivert", "Turkuaz", "Mor", "Lila", "Kahverengi", "Koyu kahve",
-                     "Açık kahve", "Bej"}
-    assert E.plain_name("Yeşim Beyazı") == E.plain_name("Fildişi Beyazı") == "Beyaz"
-    lab = E.plain_labels(["Yeşim Beyazı", "Fildişi Beyazı", "Siyah"])
-    assert len(set(lab.values())) == 3 and lab["Siyah"] == "Siyah"       # two whites stay distinguishable
-    assert E.plain_from_rgb((250, 250, 248)) == "Beyaz" and E.plain_from_rgb((200, 30, 30)) == "Kırmızı"
+def test_no_spools_anywhere_on_screen():
+    web = "".join(open(os.path.join(app2.WEB_DIR, f), encoding="utf-8").read() for f in ("index.html", "app.js"))
+    for w in ("Makaralarım", "makara", "PLA", "spool", "Bu görsel için öner"):
+        assert w not in web, w
+    names = [c["name"] for c in E.main_colours()]
+    assert len(set(names)) == len(names) and {"Siyah", "Beyaz", "Kırmızı", "Turkuaz"} <= set(names)
+
+
+def test_advice_is_shown_and_the_kind_can_be_switched(qapp, bridge, tmp_path):
+    import numpy as np
+    from PIL import Image
+    from tests.test_sade import photo
+    p = str(tmp_path / "foto.png")
+    Image.fromarray(photo()).save(p)
+    rec = Rec(bridge)
+    bridge.setWidth(20)
+    bridge.openImage(p)
+    assert spin(qapp, lambda: rec.got["built"], 120), rec.got["failed"]
+    st = json.loads(bridge.getState())
+    assert st["uygun"]["tur"] == "ton" and "sadeleştirildi" in " ".join(st["uygun"]["soz"])
+    n = len(rec.got["built"])
+    bridge.setKind("net")
+    assert spin(qapp, lambda: len(rec.got["built"]) > n, 120)
+    st = json.loads(bridge.getState())
+    assert st["uygun"]["tur"] == "net" and st["fine"]["tur"] == "net"
+    bridge.resetFine()
+    assert json.loads(bridge.getState())["fine"]["tur"] == "net"      # fine settings' reset leaves it alone
+    bridge.setKind("bilinmeyen")
+    assert json.loads(bridge.getState())["fine"]["tur"] == "net"
+    html = open(os.path.join(app2.WEB_DIR, "index.html"), encoding="utf-8").read()
+    assert 'id="fit"' in html
+
+
+def test_same_paint_twice_is_one_colour():
+    cols = [{"rgb": [0, 0, 0], "pay": .5, "oz": [[0, 0, 0, 0]], "ad": "Siyah", "hex": "#1B1B1D"},
+            {"rgb": [9, 9, 9], "pay": .3, "oz": [[2, 0, 0, 0]], "ad": "Siyah", "hex": "#1b1b1d"},
+            {"rgb": [255, 80, 0], "pay": .2, "oz": [[50, 0, 9, 9]], "ad": "Turuncu", "hex": "#FF5000"},
+            {"rgb": [250, 90, 9], "pay": .2, "oz": [[51, 0, 9, 9]], "ad": "Turuncu", "hex": "#FA5A09"}]
+    r = E.Recipe(image_path=POSTER)
+    r.use_colours(cols)
+    assert r.palette == ["Siyah", "Turuncu", "Turuncu 2"] and r.targets() == [0, 0, 1, 2]
+    k, shape = r.build_key(), r.build_key(True)
+    cols[2] = {**cols[2], "ad": "Mavi", "hex": "#1F62B5"}
+    r.use_colours(cols)
+    assert r.build_key() != k and r.build_key(True) == shape          # repainting moves no stone
+    cols[2] = {**cols[2], "ad": "Siyah", "hex": "#1B1B1D"}
+    r.use_colours(cols)
+    assert r.build_key(True) != shape                                 # joining two colours does
 
 
 def test_bridge_open_build_scene_and_controls(qapp, bridge):
@@ -133,7 +169,8 @@ def test_bridge_open_build_scene_and_controls(qapp, bridge):
     assert any(0.05 < f < E.BUILD_SHARE for f in fr) and any(E.BUILD_SHARE <= f < 1.0 for f in fr)
     st = json.loads(bridge.getState())
     assert st["style"] == "Mozaik"
-    assert 2 <= len(st["palette"]) <= 4 and set(st["palette"]) <= {"Siyah", "Kırmızı", "Fildişi Beyazı", "Altın"}
+    assert sorted(c["ad"] for c in st["colours"]) == ["Beyaz", "Kırmızı", "Siyah"] == sorted(st["palette"])
+    assert sum(c["pay"] for c in st["colours"]) == pytest.approx(1, abs=0.01)
     info = json.loads(rec.got["built"][-1])
     assert info["size_mm"][0] == pytest.approx(250, abs=2)
     for mode in ("parca", "ams"):                    # both production cards get their own numbers
@@ -152,14 +189,30 @@ def test_bridge_open_build_scene_and_controls(qapp, bridge):
     assert bridge.getPreview().startswith("data:image/png;base64,")
 
     # the four questions each trigger a new build
+    red = [c["ad"] for c in st["colours"]].index("Kırmızı")
     for call in (lambda: bridge.setWidth(30), lambda: bridge.setStyle("Blok"),
-                 lambda: bridge.setMode("ams"), lambda: bridge.setPalette(json.dumps(["Siyah", "Altın"]))):
+                 lambda: bridge.setMode("ams"), lambda: bridge.setColour(red, "Mavi")):
         n, k = len(rec.got["built"]), len(rec.got["progress"])
         call()
         assert spin(qapp, lambda: len(rec.got["built"]) > n, 60), rec.got["failed"]
         assert json.loads(rec.got["progress"][k])["f"] == 0.0      # every rebuild shows the overlay again
     st = json.loads(bridge.getState())
-    assert st["width_cm"] == 30 and st["mode"] == "ams" and st["palette"] == ["Siyah", "Altın"]
+    assert st["width_cm"] == 30 and st["mode"] == "ams" and sorted(st["palette"]) == ["Beyaz", "Mavi", "Siyah"]
+    assert st["colours"][red]["elle"] and st["colours"][red]["kaynak"] != st["colours"][red]["hex"]
+    tiles = json.loads(rec.got["built"][-1])["tiles"]
+    n = len(rec.got["built"])
+    bridge.setColour(red, "#ff8800")                 # a free colour: same stones, painted anew
+    assert spin(qapp, lambda: len(rec.got["built"]) > n, 60)
+    assert json.loads(rec.got["built"][-1])["tiles"] == tiles
+    assert {"name": "Turuncu", "hex": "#FF8800"} in json.loads(rec.got["built"][-1])["palette"]
+    for i in range(3):
+        if i != red:
+            bridge.setColour(i, "Turuncu")           # joining is fine as long as two colours are left
+    assert len(json.loads(bridge.getState())["palette"]) >= 2
+    n = len(rec.got["built"])
+    bridge.resetColours()
+    assert spin(qapp, lambda: len(rec.got["built"]) > n, 90)
+    assert sorted(json.loads(bridge.getState())["palette"]) == ["Beyaz", "Kırmızı", "Siyah"]
     assert json.loads(rec.got["built"][-1])["size_mm"][0] == pytest.approx(300, abs=2)
     bridge.setFine(json.dumps({"tas": 1.3, "bilinmeyen": 1}))
     assert json.loads(bridge.getState())["fine"]["tas"] == 1.3
@@ -187,7 +240,8 @@ def test_bridge_save_and_open_roundtrip(qapp, bridge, store, tmp_path):
         assert b2.open(path) == os.path.abspath(path)
         st = json.loads(b2.getState())
         assert st["style"] == "İri parça" and st["width_cm"] == 50 and st["fine"]["tas"] == 1.2
-        assert st["palette"] == json.loads(bridge.getState())["palette"]
+        assert st["palette"] == json.loads(bridge.getState())["palette"] and st["palette"][:1]
+        assert st["colours"] == json.loads(bridge.getState())["colours"]
         assert st["dirty"] is False
     finally:
         b2.shutdown()
@@ -207,7 +261,7 @@ def test_bridge_rejects_bad_input(qapp, bridge, tmp_path):
 
 def test_export_small_artwork(tmp_path):
     """The child-process export entry point, run in-process on a small piece."""
-    r = E.Recipe(image_path=POSTER, palette=["Siyah", "Kırmızı", "Fildişi Beyazı"], style="Mozaik", width_mm=120)
+    r = E.Recipe(image_path=POSTER, palette=["Siyah", "Kırmızı", "Beyaz"], style="Mozaik", width_mm=120)
     z = E.sibling_zones(POSTER)
     r.shapes, r.zones_from_file, r.file_default_vocab = z["sekiller"], True, z["varsayilan"]
     r.rays_center = z["isin_merkezi"]

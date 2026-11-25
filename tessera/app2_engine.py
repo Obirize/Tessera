@@ -51,10 +51,6 @@ def style_name(value: str) -> str:
     return OLD_STYLES.get(value, DEFAULT_STYLE)
 
 
-STARTER_SPOOLS = ["Siyah", "Kırmızı", "Fildişi Beyazı", "Yeşim Beyazı", "Gri", "Altın", "Mavi",
-                  "Kakao Kahve"]
-
-
 # ------------------------------------------------------------------ friendly errors
 _TR = set("çğıöşüÇĞİÖŞÜ")
 
@@ -76,21 +72,8 @@ def friendly_error(e: BaseException) -> str:
     return "Beklenmeyen bir sorun oluştu. Ayarı biraz değiştirip yeniden dene."
 
 
-# ------------------------------------------------------------------ library & presets
-_LIB: Optional[list] = None
+# ------------------------------------------------------------------ presets & colours
 _PRESETS: Optional[list] = None
-
-
-def library() -> list[dict]:
-    global _LIB
-    if _LIB is None:
-        from .pipeline.palette import load_filaments
-        _LIB = load_filaments()
-    return _LIB
-
-
-def lib_by_name() -> dict[str, dict]:
-    return {e["ad"]: e for e in library()}
 
 
 def presets() -> list[dict]:
@@ -106,88 +89,125 @@ def style_cards() -> list[dict]:
     return [{"name": n, "code": c, "aciklama": d} for n, c, d in STYLE_CARDS]
 
 
-# Plain colour words for the interface (the product name appears only in tooltips).
-PLAIN_NAMES = {
-    "Yeşim Beyazı": "Beyaz", "Fildişi Beyazı": "Beyaz", "Kemik Beyazı": "Bej", "Bej": "Bej", "Çöl Beji": "Bej",
-    "Siyah": "Siyah", "Kömür Siyahı": "Siyah",
-    "Gümüş": "Gümüş", "Gri": "Gri", "Kül Gri": "Gri", "Nardo Gri": "Gri", "Mavi Gri": "Gri",
-    "Açık Gri": "Açık gri", "Koyu Gri": "Koyu gri",
-    "Kırmızı": "Kırmızı", "Al Kırmızı": "Kırmızı", "Koyu Kırmızı": "Kırmızı", "Bordo": "Bordo", "Kiremit": "Kiremit",
-    "Macenta": "Pembe", "Pembe": "Pembe", "Fuşya Pembe": "Pembe", "Sakura Pembe": "Açık pembe",
-    "Turuncu": "Turuncu", "Balkabağı Turuncu": "Turuncu", "Mandalina Turuncu": "Turuncu",
-    "Sarı": "Sarı", "Ayçiçeği Sarısı": "Sarı", "Limon Sarısı": "Sarı", "Altın": "Altın",
-    "Bambu Yeşili": "Yeşil", "Ökseotu Yeşili": "Yeşil", "Çimen Yeşili": "Yeşil", "Parlak Yeşil": "Açık yeşil",
-    "Elma Yeşili": "Açık yeşil", "Koyu Yeşil": "Koyu yeşil", "Bronz": "Haki",
-    "Mavi": "Mavi", "Kobalt Mavi": "Mavi", "Deniz Mavisi": "Mavi", "Camgöbeği": "Açık mavi",
-    "Gök Mavisi": "Açık mavi", "Buz Mavisi": "Açık mavi", "Turkuaz": "Turkuaz", "Lacivert": "Lacivert",
-    "Mor": "Mor", "Çivit Moru": "Mor", "Erik Moru": "Mor", "Leylak Moru": "Lila",
-    "Kahverengi": "Kahverengi", "Kakao Kahve": "Kahverengi", "Koyu Kahve": "Kahverengi",
-    "Bitter Çikolata": "Koyu kahve", "Sütlü Kahve": "Açık kahve", "Karamel": "Açık kahve",
-}
+def main_colours() -> list[dict]:
+    from .pipeline.sade import TONES
+    return [{"name": n, "hex": h} for n, h in TONES]
 
 
-def plain_from_rgb(rgb) -> str:
-    """Fallback for spools that are not in the table: a word from hue and lightness."""
-    import colorsys
-    r, g, b = [c / 255 for c in rgb]
-    h, l, sat = colorsys.rgb_to_hls(r, g, b)
-    if sat < 0.15 or l < 0.08 or l > 0.93:
-        if l > 0.85:
-            return "Beyaz"
-        if l < 0.18:
-            return "Siyah"
-        return "Açık gri" if l > 0.62 else ("Koyu gri" if l < 0.38 else "Gri")
-    deg = h * 360
-    for lim, word in ((15, "Kırmızı"), (40, "Turuncu"), (65, "Sarı"), (165, "Yeşil"), (200, "Turkuaz"),
-                      (250, "Mavi"), (290, "Mor"), (340, "Pembe"), (361, "Kırmızı")):
-        if deg < lim:
-            if word in ("Turuncu", "Kırmızı") and l < 0.35:
-                return "Kahverengi"
-            return word
-    return "Renk"
+def main_hex(name: str) -> Optional[str]:
+    from .pipeline.sade import TONES
+    return dict(TONES).get(name)
 
 
-def plain_name(name: str) -> str:
-    if name in PLAIN_NAMES:
-        return PLAIN_NAMES[name]
-    e = lib_by_name().get(name)
-    if e is not None:
-        h = (e.get("onizleme_hex") or e["hex"]).lstrip("#")
-        return plain_from_rgb((int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)))
-    return name
+def rgb_hex(rgb) -> str:
+    return "#{:02X}{:02X}{:02X}".format(*[int(v) for v in rgb])
 
 
-def plain_labels(names) -> dict:
-    """{product name: plain label}, unique within ``names``: when two spools share a word, the
-    matte one says so ("Mat beyaz"); any remaining tie gets a number."""
-    names = list(dict.fromkeys(names))
-    lab = {n: plain_name(n) for n in names}
-    seen: dict = {}
-    for n in names:
-        seen.setdefault(lab[n], []).append(n)
-    for word, group in seen.items():
-        if len(group) < 2:
+def detect_colours(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[int] = None) -> list:
+    return analyse(image_path, width_mm, descreen_mode, n)[0]
+
+
+def analyse(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[int] = None,
+            tur: str = "auto") -> tuple:
+    """(colours, advice). colours: the picture's main colours, each with the colour that stands for it in
+    the mosaic [{"rgb", "pay", "oz", "ad", "hex"}], largest first; a photograph or painting (tur "ton") is
+    simplified and its colours carry "yol": "ton". advice: {"tur", "puan": "iyi"|"orta"|"zor", "soz": [...]}"""
+    from PIL import Image
+    from .pipeline import open_rgb
+    from .pipeline.build import SCREEN_MAX_MM, SCREEN_MIN_AREA, descreen_image
+    from .pipeline.renk import find, match
+    img = np.asarray(open_rgb(image_path))
+    native = img.shape[1]
+    if img.shape[1] > 1600:
+        img = np.asarray(Image.fromarray(img).resize((1600, max(8, round(img.shape[0] * 1600 / img.shape[1]))),
+                                                     Image.BOX))
+    if descreen_mode is not False:
+        img = descreen_image(img, descreen_mode, max_period_px=SCREEN_MAX_MM / (width_mm / img.shape[1]),
+                             min_area_frac=SCREEN_MIN_AREA)
+    from .pipeline import sade
+    memo: dict = {}
+
+    def own():
+        return memo.setdefault("c", memo.get("c") or find(img))
+    k, num = sade.kind(img, own)
+    kind = k if tur not in ("net", "ton") else ("ton" if tur == "ton" else (k if k != "ton" else "net"))
+    if kind == "ton":
+        found = sade.find(img, width_mm, n)
+    else:
+        found = find(img, n) if n is not None else own()
+        for c, (name, hx) in zip(found, match(found)):
+            c["ad"], c["hex"] = name, hx
+    return found, advice(img, native, width_mm, k, kind, num)
+
+
+def advice(img, native: int, width_mm: float, k: str, kind: str, num: dict) -> dict:
+    """What the user should know about this picture, in plain words."""
+    from .pipeline import sade
+    soz, puan = [], "iyi"
+    cm = width_mm / 10
+    if k == "ton":
+        puan = "zor" if num["yumusak"] > 78 else "orta"
+        if kind == "ton":
+            soz.append("Fotoğraf ya da tablo gibi çok geçişli bir görsel. Az renge ve net şekillere sadeleştirildi.")
+        else:
+            soz.append("Çok geçişli bir görsel; sadeleştirilmeden çevriliyor, lekeli çıkabilir.")
+        if puan == "zor":
+            soz.append("Dokusu çok yoğun: ince ayrıntılar kaybolur. En iyi sonucu net renkli çizim, afiş ve logolar verir.")
+    else:
+        share, w = sade.thin_lines(img, width_mm)
+        fine = share > 0.05 and w < 0.65
+        if kind == "ton":
+            soz.append("Net renkli bir görsel; senin isteğinle ayrıca sadeleştirildi.")
+        elif k == "net":
+            soz.append("Net renkli bir görsel, mozaiğe uygun.")
+        elif not fine:
+            soz.append("Çizgili bir görsel; çizgiler korunarak çevrildi.")
+        if fine:
+            puan = "zor" if share > 0.15 else "orta"
+            best = int(round(cm * 1.2 / max(w, 0.1) / 5.0) * 5)
+            mm = str(round(w, 1)).replace(".", ",")
+            soz.append(f"Çizgilerin çoğu çok ince (yaklaşık {mm} mm), basılabilmeleri için kalınlaştırıldı."
+                       if share > 0.15 else f"Yer yer çok ince çizgiler var (yaklaşık {mm} mm), kalınlaştırıldı.")
+            if cm < best:
+                soz.append(f"Aslına yakın çıkması için {min(best, 150)} cm{' ve üstü' if best > 150 else ''} gerekir.")
+    per_mm = native / width_mm
+    if per_mm < 1.4:
+        puan = "zor" if per_mm < 0.8 else ("orta" if puan == "iyi" else puan)
+        soz.append(f"Görsel küçük ({native} piksel): en çok {max(5, int(native / 1.4 / 10))} cm genişlikte net çıkar.")
+    return {"tur": kind, "bulunan": k, "puan": puan, "soz": soz, **{a: float(b) for a, b in num.items()}}
+
+
+def advise_again(r: "Recipe") -> dict:
+    """The same picture at another size: what to know about it (the kind of picture does not change)."""
+    from PIL import Image
+    from .pipeline import open_rgb
+    u = r.uygun
+    img = np.asarray(open_rgb(r.image_path))
+    native = img.shape[1]
+    if native > 1600:
+        img = np.asarray(Image.fromarray(img).resize((1600, max(8, round(img.shape[0] * 1600 / native))), Image.BOX))
+    num = {k: u[k] for k in ("yumusak", "sert", "uzak") if k in u}
+    return advice(img, native, r.width_mm, u["bulunan"], u["tur"], num)
+
+
+def unique_names(colours: list) -> list:
+    """[(name, hex)] of the colours really used, in order; the same colour twice is one, two freely
+    picked ones with the same word get a number."""
+    out, seen = [], {}
+    for c in colours:
+        hx = c["hex"].upper()
+        if any(h == hx for _, h in out):
             continue
-        for n in group:
-            e = lib_by_name().get(n) or {}
-            if e.get("seri") == "PLA Matte":
-                lab[n] = "Mat " + word[0].lower() + word[1:]
-        again: dict = {}
-        for n in group:
-            again.setdefault(lab[n], []).append(n)
-        for w, g2 in again.items():
-            for i, n in enumerate(g2[1:], start=2):
-                lab[n] = f"{w} {i}"
-    return lab
+        k = seen[c["ad"]] = seen.get(c["ad"], 0) + 1
+        out.append((c["ad"] if k == 1 else f"{c['ad']} {k}", hx))
+    return out
 
 
-def filament_for(name: str):
+def filament_for(name: str, hx: Optional[str] = None):
     from .model import Filament
-    from .pipeline.palette import to_filament
-    e = lib_by_name().get(name)
-    if e is None:
-        return Filament(name, (128, 128, 128))
-    return to_filament(e)
+    from .pipeline.renk import hex_rgb
+    hx = hx or main_hex(name)
+    return Filament(name, hex_rgb(hx) if hx else (128, 128, 128), brand="")
 
 
 # ------------------------------------------------------------------ recipe
@@ -199,10 +219,11 @@ FINE_DEFAULTS = {
     "oynama": 0.0,             # random height difference between stones, mm
     "panel": 240.0,            # AMS panel size, mm
     "taban": None,             # AMS base plate colour (palette index; None = most neutral)
+    "tur": "auto",             # kind of picture: auto | net (flat art) | ton (photograph, painting)
     "tram": "auto",            # dotted (printed) pictures: auto | True | False
     "otomatik_bolge": True,    # find rays/figures on pictures without zones
     "tabla_sirasi": "panel",   # plates in template order | fewest plates
-    "renk_sayisi": 4,          # spools used by "Bu görsel için öner"
+    "renk_sayisi": None,       # how many colours to look for (None = as many as the picture has)
     "tohum": 7,                # another arrangement of the same stones
 }
 LIGHT_AZ, LIGHT_EL = -125.0, 36.0  # the one fixed light (upper left, raking); no light controls
@@ -212,7 +233,9 @@ LIGHT_AZ, LIGHT_EL = -125.0, 36.0  # the one fixed light (upper left, raking); n
 class Recipe:
     image_path: str = ""
     width_mm: float = 424.0
-    palette: list = field(default_factory=list)       # filament names
+    palette: list = field(default_factory=list)       # names of the colours used (follows ``colours``)
+    colours: list = field(default_factory=list)       # the picture's colours and what stands for each
+    uygun: dict = field(default_factory=dict)         # what the user should know about the picture
     style: str = DEFAULT_STYLE
     mode: str = Mode.PIECES
     fine: dict = field(default_factory=lambda: dict(FINE_DEFAULTS))
@@ -228,15 +251,29 @@ class Recipe:
     def copy(self) -> "Recipe":
         r = copy.copy(self)
         r.palette = list(self.palette)
+        r.colours = copy.deepcopy(self.colours)
         r.fine = dict(self.fine)
         r.shapes = copy.deepcopy(self.shapes)
         r.zone_mask = None if self.zone_mask is None else self.zone_mask.copy()
         return r
 
-    def build_key(self) -> str:
+    def use_colours(self, colours: list) -> None:
+        self.colours = colours
+        self.palette = [n for n, _ in unique_names(colours)]
+
+    def targets(self) -> list:
+        """Palette index of every colour of the picture."""
+        u = [h for _, h in unique_names(self.colours)]
+        return [u.index(c["hex"].upper()) for c in self.colours]
+
+    def build_key(self, shape_only: bool = False) -> str:
+        """shape_only: what decides the stones themselves; giving a colour another paint keeps it."""
         import hashlib
         h = hashlib.sha1()
-        d = {k: v for k, v in asdict(self).items() if k not in ("zone_mask", "light_az", "light_el", "name")}
+        d = {k: v for k, v in asdict(self).items() if k not in ("zone_mask", "light_az", "light_el", "name", "uygun")}
+        if shape_only and self.colours:
+            d.pop("palette")
+            d["colours"] = [[c["oz"], t] for c, t in zip(self.colours, self.targets())]
         h.update(json.dumps(d, sort_keys=True, default=str).encode())
         if self.zone_mask is not None:
             h.update(self.zone_mask.tobytes())
@@ -247,7 +284,12 @@ class Recipe:
         from .pipeline import working_mm_per_px
         s = Settings()
         s.width_mm = float(self.width_mm)
-        s.palette = [filament_for(n) for n in self.palette]
+        if self.colours:
+            s.palette = [filament_for(n, h) for n, h in unique_names(self.colours)]
+            s.source_colours = [{"rgb": list(c["rgb"]), "oz": c["oz"], "hedef": t, "yol": c.get("yol", "")}
+                                for c, t in zip(self.colours, self.targets())]
+        else:
+            s.palette = [filament_for(n) for n in self.palette]
         s.mode = self.mode if self.mode in (Mode.PIECES, Mode.AMS) else Mode.PIECES
         s.style = STYLE_CODES.get(style_name(self.style), "mozaik")
         if self.zones_from_file and self.file_default_vocab is not None:
@@ -301,7 +343,7 @@ class Recipe:
 
 def recipe_extra(r: Recipe) -> dict:
     """What a project file needs beyond Project's own fields (stored in its 'ad' block free keys)."""
-    return {"stil": style_name(r.style), "ince_ayar": r.fine, "bolge_dosyadan": r.zones_from_file,
+    return {"stil": style_name(r.style), "ince_ayar": r.fine, "renkler": r.colours, "uygun": r.uygun, "bolge_dosyadan": r.zones_from_file,
             "dosya_varsayilan": r.file_default_vocab}
 
 
@@ -458,6 +500,13 @@ def style_thumbnail(img: np.ndarray, r: "Recipe", s: Settings, found: Optional[d
     rc = r.rays_center or (found or {}).get("rays_center")
     s.rays_center = (rc[0] * w - x0, rc[1] * h - y0) if rc else None
     s.width_mm = s.width_mm * side / w
+    s.source_zoom = w / side
+    if r.colours and r.colours[0].get("yol") == "ton":   # simplified as a whole, then the detail is cut out
+        from .pipeline import sade
+        full = sade.label(img, s.source_colours, r.width_mm)
+        k = full.shape[1] / w
+        s.source_label = full[int(y0 * k):int((y0 + side) * k), int(x0 * k):int((x0 + side) * k)]
+    s.descreen = False                  # img is already free of print dots
     m = build_mosaic(img[y0:y0 + side, x0:x0 + side], s, zone[y0:y0 + side, x0:x0 + side])
     return png_bytes(np.asarray(Image.fromarray(render_cut(m, 2 * size)).resize((size, size), Image.LANCZOS)), "JPEG", 88)
 
@@ -480,6 +529,10 @@ plain = _plain
 
 
 # ------------------------------------------------------------------ the worker thread
+class Superseded(Exception):
+    """The user has asked for something else meanwhile; whatever is running is not needed any more."""
+
+
 class Engine:
     """One worker thread. Callbacks are invoked from the worker thread; the Qt host turns
     them into queued signals.
@@ -487,16 +540,17 @@ class Engine:
     on_built(gen, info dict, mosaic)       after every build (numbers + preview png bytes)
     on_scene(gen, glb bytes, meta dict)    real part meshes (fast quality), right after
     on_thumb(gen, style, jpeg bytes)       style cards
-    on_palette(gen, names, roles)          suggested spools
+    on_palette(gen, colours, advice)       the picture's colours and what to know about it
     on_error(gen, kind, message_tr)
     on_busy(bool, message_tr)
     """
 
     def __init__(self, on_built, on_scene, on_thumb, on_palette, on_error, on_busy, on_progress=None,
-                 on_plates=None):
+                 on_plates=None, on_advice=None):
         self.cb = dict(built=on_built, scene=on_scene, thumb=on_thumb, palette=on_palette,
                        error=on_error, busy=on_busy, progress=on_progress or (lambda gen, f, msg: None),
-                       plates=on_plates or (lambda gen, glb, meta: None))
+                       plates=on_plates or (lambda gen, glb, meta: None),
+                       advice=on_advice or (lambda path, width, a: None))
         self._cv = threading.Condition()
         self._build: Optional[tuple] = None      # (gen, recipe)
         self._jobs: list = []                    # low priority: ("thumbs", gen, recipe) ...
@@ -506,6 +560,7 @@ class Engine:
         self._thumb_cache: dict = {}
         self.mosaic = None
         self.mosaic_key = ""
+        self.mosaic_shape = ""
         self.mosaic_gen = -1
         self._t = threading.Thread(target=self._run, name="tessera-engine", daemon=True)
         self._t.start()
@@ -520,8 +575,13 @@ class Engine:
     def thumbs(self, gen: int, r: Recipe) -> None:
         self._push(("thumbs", gen, r.copy()))
 
-    def suggest(self, gen: int, r: Recipe, owned: list) -> None:
-        self._push(("suggest", gen, r.copy(), list(owned)))
+    def detect(self, gen: int, r: Recipe) -> None:
+        with self._cv:                                # before anything else that is waiting
+            self._jobs = [("detect", gen, r.copy())] + [j for j in self._jobs if j[0] not in ("detect", "thumbs")]
+            self._cv.notify()
+
+    def advise(self, gen: int, r: Recipe) -> None:
+        self._push(("advise", gen, r.copy()))
 
     def _push(self, job) -> None:
         with self._cv:
@@ -536,7 +596,7 @@ class Engine:
 
     def superseded(self) -> bool:
         with self._cv:
-            return self._build is not None
+            return self._stop or self._build is not None or any(j[0] == "detect" for j in self._jobs)
 
     # -------------------------------------------------- thread
     def _run(self) -> None:
@@ -552,7 +612,11 @@ class Engine:
                     job = self._jobs.pop(0)
             try:
                 getattr(self, "_do_" + job[0])(*job[1:])
+            except Superseded:
+                pass
             except Exception as e:  # noqa: BLE001 - shown to the user
+                if self._stop:                        # closing: nobody is there to be told
+                    return
                 traceback.print_exc()
                 self.cb["error"](job[1], job[0], friendly_error(e))
             finally:
@@ -568,19 +632,25 @@ class Engine:
             return
 
         def P(f, msg):
+            if self.superseded():
+                raise Superseded
             self.cb["progress"](gen, BUILD_SHARE * f, msg)
         self.cb["busy"](True, "Mozaiğe dönüştürülüyor")
         P(0.0, "Görsel okunuyor")
         t0 = time.perf_counter()
-        key = r.build_key()
-        if key != self.mosaic_key or self.mosaic is None:
+        key, shape = r.build_key(), r.build_key(True)
+        found = None
+        if key != self.mosaic_key and self.mosaic is not None and r.colours and shape == self.mosaic_shape:
+            m = copy.copy(self.mosaic)                # only a paint was changed: the same stones, painted anew
+            m.settings = copy.copy(m.settings)
+            m.settings.palette = r.settings(True).palette
+            self.mosaic, self.mosaic_key = m, key
+        elif key != self.mosaic_key or self.mosaic is None:
             m, found = build_mosaic_for(r, True, self._image_cache, self._zones,
                                         progress=lambda f, msg: P(0.02 + 0.86 * max(0.0, min(1.0, f)), msg))
             if self.superseded():
                 return
-            self.mosaic, self.mosaic_key = m, key
-        else:
-            found = None
+            self.mosaic, self.mosaic_key, self.mosaic_shape = m, key, shape
         self.mosaic_gen = gen
         m = self.mosaic
         P(0.9, "Parça ve süre hesaplanıyor")
@@ -604,6 +674,8 @@ class Engine:
         from .export.api import scene_glb
 
         def S(f, msg=""):
+            if self.superseded():
+                raise Superseded
             self.cb["progress"](gen, BUILD_SHARE + (1 - BUILD_SHARE) * 0.98 * max(0.0, min(1.0, float(f))),
                                 msg or "Taşlar tek tek kuruluyor")
         S(0.0, "Taşlar tek tek kuruluyor")
@@ -646,17 +718,13 @@ class Engine:
                 self._thumb_cache[k] = jpg
             self.cb["thumb"](gen, name, jpg)
 
-    def _do_suggest(self, gen: int, r: Recipe, owned: list) -> None:
-        from PIL import Image
-        from .pipeline import open_rgb, suggest_palette
-        im = open_rgb(r.image_path)
-        im.thumbnail((300, 300))
-        lib = [dict(e, owned=(e["ad"] in owned)) for e in library()]
-        k = int((r.fine or {}).get("renk_sayisi", 4))
-        res = suggest_palette(np.asarray(im), lib, k, owned_only=True)
-        names = [x["filament"].name for x in res]
-        roles = {x["filament"].name: x.get("rol", "") for x in res}
-        self.cb["palette"](gen, names, roles)
+    def _do_advise(self, gen: int, r: Recipe) -> None:
+        self.cb["advice"](r.image_path, r.width_mm, advise_again(r))
+
+    def _do_detect(self, gen: int, r: Recipe) -> None:
+        f = {**FINE_DEFAULTS, **(r.fine or {})}
+        self.cb["palette"](gen, *analyse(r.image_path, r.width_mm, f.get("tram", "auto"), f.get("renk_sayisi"),
+                                         f.get("tur", "auto")))
 
 
 # ------------------------------------------------------------------ child processes

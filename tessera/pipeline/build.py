@@ -31,6 +31,7 @@ from .tiling import (andamento as andamento_tiles, blocks_adaptive, edge_distanc
 
 # ------------------------------------------------------------------ io
 SCREEN_MAX_MM = 9.0   # dot patterns finer than this (in the finished mosaic) count as print screens
+SCREEN_MIN_AREA = 0.04   # a dotted print covers real areas; a smaller "screen" is an ornament
 
 
 _SCREEN_MEMO: dict = {}   # fingerprint of a loaded working image -> screen mask at working size
@@ -127,7 +128,7 @@ def load_image(path_or_img, settings: Settings, *, descreen=None,
         px_mm = settings.width_mm / im.width
         if progress:
             progress(0.4, "Tram çözülüyor")
-        arr, smask = descreen_image(np.asarray(im), mode, max_period_px=SCREEN_MAX_MM / px_mm, return_mask=True)
+        arr, smask = descreen_image(np.asarray(im), mode, max_period_px=SCREEN_MAX_MM / px_mm, min_area_frac=SCREEN_MIN_AREA, return_mask=True)
         im = Image.fromarray(arr)
     else:
         smask = None
@@ -276,13 +277,13 @@ def _source_for(image, img: np.ndarray, source, max_scale: float = 2.0, descreen
 def _check_palette(settings: Settings) -> np.ndarray:
     pal = getattr(settings, "palette", None) or []
     if len(pal) < 2:
-        raise ValueError("En az 2 filament gerekli: renk adımında en az iki filament seç.")
+        raise ValueError("En az 2 renk gerekli.")
     try:
         arr = np.array([tuple(int(v) for v in f.rgb[:3]) for f in pal], np.float32)
     except (TypeError, ValueError, AttributeError) as e:
-        raise ValueError("Filament rengi okunamadı: her filamentin rengi (R, G, B) olmalı.") from e
+        raise ValueError("Renk okunamadı: her rengin (R, G, B) değeri olmalı.") from e
     if arr.ndim != 2 or arr.shape[1] != 3 or (arr < 0).any() or (arr > 255).any():
-        raise ValueError("Filament rengi geçersiz: R, G, B değerleri 0–255 arasında olmalı.")
+        raise ValueError("Renk geçersiz: R, G, B değerleri 0–255 arasında olmalı.")
     return arr
 
 
@@ -370,7 +371,7 @@ def build_mosaic(image, settings: Settings, zone_map: Optional[np.ndarray] = Non
     pal = pal_full[to_full]
     k = len(pal)
     if k < 2:
-        raise ValueError("En az 2 farklı renkte filament gerekli (seçilen filamentlerin rengi aynı).")
+        raise ValueError("En az 2 farklı renk gerekli: bütün renkler aynı seçilmiş.")
     if getattr(settings, "style", None) in LAYOUTS and not getattr(settings, "merge_same_colour", False):
         return _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, mark, report)
     min_feat_mm = float(getattr(settings, "min_feature_mm", 1.6))
@@ -563,13 +564,22 @@ def _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, 
     if src.shape[1] > 2400:
         src = np.asarray(Image.fromarray(src).resize((2400, int(round(src.shape[0] * 2400 / src.shape[1]))), Image.BOX))
     if ds_mode is not False:
-        src = descreen_image(src, ds_mode, max_period_px=SCREEN_MAX_MM / (w * settings.mm_per_px / src.shape[1]))
+        src = descreen_image(src, ds_mode, max_period_px=SCREEN_MAX_MM / (w * settings.mm_per_px / src.shape[1]),
+                             min_area_frac=SCREEN_MIN_AREA)
     mark("girdi", 0.06, "Renkler ayrılıyor")
     zone = _check_zone(zone_map, settings, (h, w))
     rc = settings.rays_center
     centre = (rc[0] / w, rc[1] / h) if rc else None
     ams = settings.mode == Mode.AMS
-    r = kesim.build(src, w * settings.mm_per_px, pal, layout=settings.style, zone=zone, centre=centre,
+    cols = getattr(settings, "source_colours", None) or None
+    to = None
+    if cols:                                     # palette position -> position among the distinct colours
+        pf = _check_palette(settings)
+        same = np.array([int(np.flatnonzero((pal == c).all(1))[0]) for c in pf])
+        to = same[np.clip(np.asarray([int(c["hedef"]) for c in cols]), 0, len(pf) - 1)]
+    r = kesim.build(src, w * settings.mm_per_px, pal, colours=cols, to=to,
+                    zoom=float(getattr(settings, "source_zoom", 1.0)),
+                    labels=getattr(settings, "source_label", None), layout=settings.style, zone=zone, centre=centre,
                     gap=float(settings.gap_mm), size=float(getattr(settings, "stone_scale", 1.0)),
                     seed=int(settings.seed), ams=ams, report=lambda f, m: report(0.06 + 0.88 * f, m))
     polys, pc, pz = r["polys"], to_full[r["colour"]], r["zone"]

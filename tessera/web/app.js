@@ -44,22 +44,9 @@ function render() {
   if (document.activeElement !== win) win.value = fmt0.format(S.width_cm).replace(/\./g, '');
   $('#btn-example').style.display = S.example ? '' : 'none';
   $('#btn-save').disabled = !S.image.path;
+  renderFit();
   // 2
-  const sp = $('#spools');
-  sp.innerHTML = '';
-  for (const s of S.spools) {
-    const b = document.createElement('button');
-    const on = S.palette.includes(s.name);
-    b.className = 'spool ' + (on ? 'on' : 'off');
-    b.style.setProperty('--c', s.hex);
-    b.title = s.label === s.name ? s.name : `${s.label} (${s.name})`;
-    b.onclick = () => togglePalette(s.name);
-    sp.appendChild(b);
-  }
-  $('#chosen').innerHTML = S.palette.length
-    ? S.palette.map((n) => `<b title="${esc(n)}">${esc(label(n))}</b>`).join(' · ')
-    : 'Kullanılacak makaralara dokun.';
-  $('#btn-suggest').disabled = !S.image.path;
+  renderColours();
   // 3
   const st = $('#styles');
   if (st.children.length !== S.styles.length) {
@@ -104,7 +91,7 @@ function renderNumbers() {
   $('#n-parca').textContent = p.parca != null
     ? `${fmt0.format(p.parca)} taş · ${p.tabla} tabla · ~${fmt0.format(p.saat)} saat` : '';
   $('#n-ams').textContent = a.panel != null
-    ? `${a.panel} panel · ~${fmt0.format(a.purge_gram)} g atık · ~${fmt0.format(a.saat)} saat` : '';
+    ? `${a.panel} panel · ~${fmt0.format(a.purge_gram)} g atık · ~${fmt0.format(a.saat)} saat` + ((S.palette || []).length > 4 ? ` · ${S.palette.length} renk: ${Math.ceil(S.palette.length / 4)} AMS gerekir` : '') : '';
 }
 
 function summaryLine() {
@@ -132,7 +119,6 @@ function renderFine() {
   $('#f-acilis').checked = S.acilis !== false;
   segOn('#f-tabla', f.tabla_sirasi);
   segOn('#f-tram', String(f.tram));
-  segOn('#f-renk', String(f.renk_sayisi));
   colourSeg('#f-taban', 'taban', 'Kendisi seçsin');
 }
 function fineLabel(k, v) {
@@ -145,7 +131,7 @@ function colourSeg(sel, key, first) {
   const k = $(sel);
   k.innerHTML = '';
   const cur = S.fine[key] == null ? null : S.fine[key];
-  const opts = [{ v: null, t: first }, ...S.palette.map((n, i) => ({ v: i, t: label(n), hex: spoolHex(n) }))];
+  const opts = [{ v: null, t: first }, ...S.palette.map((n, i) => ({ v: i, t: n, hex: S.hexes[n] }))];
   for (const o of opts) {
     const b = document.createElement('button');
     b.innerHTML = (o.hex ? `<span class="sw" style="background:${o.hex}"></span>` : '') + esc(o.t);
@@ -156,15 +142,6 @@ function colourSeg(sel, key, first) {
 }
 function segOn(sel, v) { for (const b of $(sel).children) b.classList.toggle('on', b.dataset.v === v); }
 function fine(patch) { py.setFine(JSON.stringify(patch)); }
-function label(n) { return (S && S.labels && S.labels[n]) || (S && (S.library || []).find((x) => x.name === n) || {}).label || n; }
-function plainTitle(t) {          // "Yeşim Beyazı 3" -> "Beyaz 3" (plate titles come with product names)
-  if (!S) return t;
-  const names = Object.keys(S.labels || {}).concat((S.library || []).map((x) => x.name)).sort((a, b) => b.length - a.length);
-  for (const n of names) if (t.startsWith(n)) return label(n) + t.slice(n.length);
-  return t;
-}
-function spoolHex(n) { const s = (S.library || []).find((x) => x.name === n); return s ? s.hex : '#888'; }
-
 function bindFine() {
   for (const k of ['tas', 'derz', 'kalinlik', 'kabartma', 'oynama', 'panel']) {
     const el = $('#f-' + k);
@@ -177,7 +154,6 @@ function bindFine() {
   });
   seg('#f-tabla', 'tabla_sirasi', (v) => v);
   seg('#f-tram', 'tram', (v) => (v === 'auto' ? 'auto' : v === 'true'));
-  seg('#f-renk', 'renk_sayisi', (v) => parseInt(v, 10));
   $('#f-acilis').onchange = (e) => py.setSplash(e.target.checked);
   $('#f-tohum').onclick = () => fine({ tohum: Math.floor(Math.random() * 9000) + 10 });
   $('#fine-reset').onclick = () => py.resetFine();
@@ -188,43 +164,68 @@ function bindFine() {
 function sheet(sel) {
   for (const s of $$('.sheet')) s.classList.toggle('on', sel && s.matches(sel) && !s.classList.contains('on'));
   body.classList.toggle('fine-open', $('#sheet-fine').classList.contains('on'));
-  if (sel === '#sheet-lib') renderLibrary();
 }
 
-// ------------------------------------------------------------------ spools
-function togglePalette(name) {
-  if (!S.image.path) return;
-  let p = [...S.palette];
-  if (p.includes(name)) { if (p.length <= 2) { toast('En az iki renk gerekir.'); return; } p = p.filter((x) => x !== name); }
-  else p.push(name);
-  S.palette = p;
-  render();
-  py.setPalette(JSON.stringify(p));
+// ------------------------------------------------------------------ colours of the picture
+// what the program thinks of this picture, and the way out when it is wrong
+function renderFit() {
+  const u = S.uygun || {}, f = $('#fit');
+  const on = !!(S.image.path && u.soz && u.soz.length && !S.finding);
+  f.className = 'fit' + (on ? ' on ' + u.puan : '');
+  if (!on) return;
+  $('#fit-t').textContent = u.soz.join(' ');
+  const simple = u.tur === 'ton';
+  $('#fit-b').textContent = simple ? 'Sadeleştirmeden dene' : 'Sadeleştirerek dene';
+  $('#fit-b').onclick = () => { openCol = null; py.setKind(simple ? 'net' : 'ton'); };
 }
-
-function renderLibrary() {
-  const host = $('#lib');
+let openCol = null;
+function renderColours() {
+  const cs = S.colours || [];
+  const host = $('#cols');
   host.innerHTML = '';
-  const owned = new Set(S.library.filter((x) => x.owned).map((x) => x.name));
-  const groups = {};
-  for (const e of S.library) (groups[e.series] = groups[e.series] || []).push(e);
-  for (const [ser, items] of Object.entries(groups)) {
-    const h = document.createElement('div'); h.className = 'lib-h'; h.textContent = ser; host.appendChild(h);
-    const g = document.createElement('div'); g.className = 'lib-g';
-    for (const e of items) {
-      const b = document.createElement('button');
-      b.className = 'lib-i' + (owned.has(e.name) ? ' on' : '');
-      b.title = e.name;
-      b.innerHTML = `<span class="spool" style="--c:${e.hex}"></span><span>${esc(e.label || e.name)}</span>`;
-      b.onclick = () => {
-        if (owned.has(e.name)) owned.delete(e.name); else owned.add(e.name);
-        b.classList.toggle('on');
-        py.setOwned(JSON.stringify(S.library.filter((x) => owned.has(x.name)).map((x) => x.name)));
-      };
-      g.appendChild(b);
-    }
-    host.appendChild(g);
+  if (openCol != null && openCol >= cs.length) openCol = null;
+  $('#found').textContent = !S.image.path ? 'Bir görsel seçince renkleri burada görünür.'
+    : S.finding || !cs.length ? 'Görselin renkleri bulunuyor…'
+      : (S.uygun && S.uygun.tur === 'ton' ? `Görsel ${cs.length} renge sadeleştirildi.` : S.fine.renk_sayisi ? `Görsel ${cs.length} renge ayrıldı.` : `Görselde ${cs.length} renk var.`) + " Değiştirmek istediğine dokun.";
+  cs.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.className = 'col' + (openCol === i ? ' on' : '');
+    b.style.setProperty('--c', c.hex);
+    b.style.setProperty('--k', c.kaynak);
+    b.title = 'Köşedeki ton, bu rengin görseldeki hâli';
+    const pc = c.pay * 100;
+    b.innerHTML = `<span class="sw"></span><span class="nm">${esc(c.ad)}</span><span class="pc">%${pc < 1 ? fmt1.format(Math.max(pc, 0.1)) : fmt0.format(pc)}</span>`;
+    b.onclick = () => { openCol = openCol === i ? null : i; renderColours(); };
+    host.appendChild(b);
+  });
+  $('#n-cols').textContent = cs.length || '';
+  $('#n-less').disabled = S.finding || cs.length <= 2;
+  $('#n-more').disabled = S.finding || cs.length >= 12 || !cs.length;
+  $('#btn-recolour').style.visibility = cs.some((c) => c.elle) || S.fine.renk_sayisi ? 'visible' : 'hidden';
+  renderPop();
+}
+function renderPop() {
+  const p = $('#pop'), c = openCol == null ? null : S.colours[openCol];
+  p.classList.toggle('on', !!c);
+  if (!c) return;
+  const i = openCol;
+  $('#pop-t').textContent = `${c.ad} yerine`;
+  const g = $('#pop-g');
+  g.innerHTML = '';
+  for (const m of S.main) {
+    const b = document.createElement('button');
+    b.style.setProperty('--c', m.hex);
+    b.title = m.name;
+    b.className = m.hex.toUpperCase() === c.hex.toUpperCase() ? 'on' : '';
+    b.onclick = () => py.setColour(i, m.name);
+    b.onmouseenter = () => { $('#pop-t').textContent = `${c.ad} yerine ${m.name.toLocaleLowerCase('tr')}`; };
+    b.onmouseleave = () => { $('#pop-t').textContent = `${c.ad} yerine`; };
+    g.appendChild(b);
   }
+  $('#pop-same').style.setProperty('--c', c.kaynak);
+  $('#pop-same').onclick = () => py.setColour(i, 'gorsel');
+  $('#pop-c').value = c.hex.toLowerCase();
+  $('#pop-c').onchange = (e) => py.setColour(i, e.target.value);
 }
 
 // ------------------------------------------------------------------ views
@@ -255,8 +256,7 @@ let platesState = null;
 let plateOf = {};                 // stone code -> plate title (from plates_glb)
 async function plates(info) {
   platesState = info;
-  const meta = { ...info.meta, plates: (info.meta.plates || []).map((p) => ({ ...p, title: plainTitle(p.title) })) };
-  await stage.loadPlates(info.url, meta);
+  await stage.loadPlates(info.url, info.meta);
   body.classList.add('plates-ready');
   plateIdx = null;
   renderPlateNav();
@@ -271,7 +271,7 @@ function renderPlateNav() {
   } else {
     const p = ps[plateIdx];
     const dot = p.hex ? `<i style="background:${p.hex}"></i>` : '';
-    t.innerHTML = `<b>${plateIdx + 1} / ${ps.length}</b>${dot}${esc(plainTitle(p.title))} · ${p.codes.length} taş · ~${fmt1.format(p.hours)} saat`;
+    t.innerHTML = `<b>${plateIdx + 1} / ${ps.length}</b>${dot}${esc(p.title)} · ${p.codes.length} taş · ~${fmt1.format(p.hours)} saat`;
   }
 }
 function stepPlate(d) {
@@ -288,13 +288,13 @@ function showPart(m) {
   if (!m) return;
   $('#part-code').textContent = m.code;
   $('#part-sw').style.background = m.hex;
-  $('#part-colour').textContent = label(m.colour_name);
+  $('#part-colour').textContent = m.colour_name;
   $('#part-colour').title = m.colour_name;
   const [w, h, d] = m.size_mm;
   $('#part-size').textContent = `${fmt0.format(w)} × ${fmt0.format(h)} mm, ${fmt1.format(d)} mm yükseklik`;
   $('#part-panel').textContent = m.template_page ? `sayfa ${m.template_page} · panel ${m.panel}` : m.panel;
   const pl = m.plate || plateOf[m.code];
-  $('#part-plate').textContent = pl ? plainTitle(pl) : 'tablalar diziliyor…';
+  $('#part-plate').textContent = pl ? pl : 'tablalar diziliyor…';
 }
 
 // ------------------------------------------------------------------ converting overlay
@@ -345,9 +345,10 @@ function bindUi() {
   const commitW = () => { const v = parseFloat(String(w.value).replace(',', '.')); if (v > 0) py.setWidth(v); };
   w.addEventListener('change', commitW);
   w.addEventListener('keydown', (e) => { if (e.key === 'Enter') { commitW(); w.blur(); } });
-  $('#btn-suggest').onclick = () => py.suggestPalette();
-  $('#btn-library').onclick = () => sheet('#sheet-lib');
-  $('#lib-close').onclick = () => sheet(null);
+  $('#n-less').onclick = () => py.setColourCount(S.colours.length - 1);
+  $('#n-more').onclick = () => py.setColourCount(S.colours.length + 1);
+  $('#btn-recolour').onclick = () => { openCol = null; py.resetColours(); };
+  $('#pop-x').onclick = () => { openCol = null; renderColours(); };
   for (const m of $$('.mode')) m.onclick = () => S.image.path && py.setMode(m.dataset.mode);
   for (const b of $$('#views button')) b.onclick = () => setView(b.dataset.view);
   $('#in-explode').addEventListener('input', (e) => { const t = parseFloat(e.target.value); if (t > 0) stage.obliqueIfFrontal(); stage.setExplode(t); });
@@ -366,7 +367,7 @@ function bindUi() {
   window.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.key.toLowerCase() === 's') { e.preventDefault(); py.save(''); }
     if (e.ctrlKey && e.key.toLowerCase() === 'o') { e.preventDefault(); py.open(''); }
-    if (e.key === 'Escape') { sheet(null); stage.select(null); body.classList.remove('done-open'); }
+    if (e.key === 'Escape') { openCol = null; renderColours(); sheet(null); stage.select(null); body.classList.remove('done-open'); }
     if (view === 'plates' && e.key === 'ArrowRight') stepPlate(1);
     if (view === 'plates' && e.key === 'ArrowLeft') stepPlate(-1);
   });

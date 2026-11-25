@@ -82,6 +82,9 @@ class Settings:
     width_mm: float = 424.0               # physical width of the artwork; height follows the image
     mm_per_px: float = 0.4                # working raster resolution
     palette: list[Filament] = field(default_factory=list)
+    source_colours: list = field(default_factory=list)   # the picture's colours (renk.find) + "hedef": palette index
+    source_label: Optional[object] = None  # index map into source_colours (thumbnails of simplified pictures)
+    source_zoom: float = 1.0              # > 1: the image is only a part of the picture (thumbnails)
     mode: str = Mode.PIECES
     vocab: dict[int, VocabParams] = field(default_factory=default_vocab_params)
     default_vocab: int = int(Vocab.STONES)
