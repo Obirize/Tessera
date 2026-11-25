@@ -32,15 +32,23 @@ ROLE_HELP_TR = {
 
 
 # ------------------------------------------------------------------ colour maths
-def _hex_rgb(h: str) -> tuple[int, int, int]:
+def hex_rgb(h: str) -> tuple[int, int, int]:
     h = h.strip().lstrip("#")
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
+def _linear(c: np.ndarray) -> np.ndarray:
+    c = c / 255.0
+    return np.where(c > 0.04045, ((c + 0.055) / 1.055) ** 2.4, c / 12.92)
+
+
+_LINEAR = _linear(np.arange(256, dtype=np.float64))      # a uint8 picture needs only 256 powers
+
+
 def rgb_to_lab(rgb) -> np.ndarray:
     """sRGB uint8 (..., 3) -> CIE Lab (D65)."""
-    c = np.asarray(rgb, np.float64) / 255.0
-    c = np.where(c > 0.04045, ((c + 0.055) / 1.055) ** 2.4, c / 12.92)
+    a = np.asarray(rgb)
+    c = _LINEAR[a] if a.dtype == np.uint8 else _linear(a.astype(np.float64))
     m = np.array([[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]])
     xyz = c @ m.T / np.array([0.95047, 1.0, 1.08883])
     f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116)
@@ -71,7 +79,7 @@ def to_filament(entry: Union[dict, Filament]) -> Filament:
     """Library entry -> model.Filament (rgb = realistic preview colour)."""
     if isinstance(entry, Filament):
         return entry
-    rgb = _hex_rgb(entry.get("onizleme_hex") or entry["hex"])
+    rgb = hex_rgb(entry.get("onizleme_hex") or entry["hex"])
     return Filament(entry["ad"], rgb, entry.get("yuzey", "matte"), "Bambu", bool(entry.get("owned", True)))
 
 

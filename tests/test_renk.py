@@ -6,7 +6,7 @@ import pytest
 from PIL import Image, ImageDraw, ImageFilter
 
 from tessera import app2_engine as E
-from tessera.pipeline import kesim, open_rgb, renk
+from tessera.pipeline import kesim, renk
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -79,7 +79,7 @@ def test_example_pictures(f, names):
     p = os.path.join(ROOT, "ornekler", f)
     if not os.path.exists(p):
         pytest.skip("örnek yok")
-    c = E.detect_colours(p, 420)
+    c = E.analyse(p, 420)[0]
     assert {x["ad"] for x in c} == names
     assert len({x["hex"] for x in c}) == len(c)
 

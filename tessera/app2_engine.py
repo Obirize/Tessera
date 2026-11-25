@@ -1,6 +1,6 @@
 """Background work for the Tessera v2 interface (tessera/app2.py). No widgets here.
 
-- ``Recipe``: everything the user decided (image, width, spools, style, mode, fine settings).
+- ``Recipe``: everything the user decided (image, width, colours, style, mode, fine settings).
   It is plain data so it can travel to a child process and into a project file.
 - ``Engine``: one long-lived worker thread. Only the newest build matters (a slider drag never
   queues work). After a build it renders the style thumbnails, at a lower priority.
@@ -18,14 +18,13 @@ import threading
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
+from functools import cache, lru_cache
 from typing import Any, Callable, Optional
 
 import numpy as np
 
-from .model import Mode, Settings, VocabParams, Vocab
+from .model import Filament, Mode, Settings, Vocab, rgb_hex  # noqa: F401 (rgb_hex: for the bridge)
 from .project import PAINT_NONE, Project, apply_paint
-
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 # The four textures (R8): card name, Settings.style, one honest sentence. The picture is always cut the
 # same way (one colour per stone, eyes and lips whole); the texture only decides how large areas divide.
@@ -72,39 +71,32 @@ def friendly_error(e: BaseException) -> str:
     return "Beklenmeyen bir sorun oluştu. Ayarı biraz değiştirip yeniden dene."
 
 
-# ------------------------------------------------------------------ presets & colours
-_PRESETS: Optional[list] = None
-
-
-def presets() -> list[dict]:
-    global _PRESETS
-    if _PRESETS is None:
-        with open(os.path.join(DATA_DIR, "presets.json"), encoding="utf-8") as fh:
-            d = json.load(fh)
-        _PRESETS = d.get("ayarlar", []) if isinstance(d, dict) else list(d)
-    return _PRESETS
-
-
+# ------------------------------------------------------------------ colours
 def style_cards() -> list[dict]:
     return [{"name": n, "code": c, "aciklama": d} for n, c, d in STYLE_CARDS]
 
 
 def main_colours() -> list[dict]:
-    from .pipeline.sade import TONES
+    from .pipeline.renk import TONES
     return [{"name": n, "hex": h} for n, h in TONES]
 
 
 def main_hex(name: str) -> Optional[str]:
-    from .pipeline.sade import TONES
+    from .pipeline.renk import TONES
     return dict(TONES).get(name)
 
 
-def rgb_hex(rgb) -> str:
-    return "#{:02X}{:02X}{:02X}".format(*[int(v) for v in rgb])
-
-
-def detect_colours(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[int] = None) -> list:
-    return analyse(image_path, width_mm, descreen_mode, n)[0]
+@lru_cache(maxsize=1)
+def _look(path: str, mtime: float, width_mm: float, descreen_mode) -> tuple:
+    """What does not depend on any wish: (picture, native width, kind, softness, () -> its own flat colours)."""
+    from .pipeline import renk, sade
+    from .pipeline.build import open_capped, screen_free
+    img, native = open_capped(path)
+    if descreen_mode is not False:
+        img = screen_free(img, descreen_mode, width_mm)
+    own = cache(lambda: renk.find(img))
+    k, soft = sade.kind(img, own)
+    return img, native, k, round(soft, 1), own
 
 
 def analyse(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[int] = None,
@@ -112,41 +104,42 @@ def analyse(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[
     """(colours, advice). colours: the picture's main colours, each with the colour that stands for it in
     the mosaic [{"rgb", "pay", "oz", "ad", "hex"}], largest first; a photograph or painting (tur "ton") is
     simplified and its colours carry "yol": "ton". advice: {"tur", "puan": "iyi"|"orta"|"zor", "soz": [...]}"""
-    from PIL import Image
-    from .pipeline import open_rgb
-    from .pipeline.build import SCREEN_MAX_MM, SCREEN_MIN_AREA, descreen_image
-    from .pipeline.renk import find, match
-    img = np.asarray(open_rgb(image_path))
-    native = img.shape[1]
-    if img.shape[1] > 1600:
-        img = np.asarray(Image.fromarray(img).resize((1600, max(8, round(img.shape[0] * 1600 / img.shape[1]))),
-                                                     Image.BOX))
-    if descreen_mode is not False:
-        img = descreen_image(img, descreen_mode, max_period_px=SCREEN_MAX_MM / (width_mm / img.shape[1]),
-                             min_area_frac=SCREEN_MIN_AREA)
-    from .pipeline import sade
-    memo: dict = {}
-
-    def own():
-        return memo.setdefault("c", memo.get("c") or find(img))
-    k, num = sade.kind(img, own)
-    kind = k if tur not in ("net", "ton") else ("ton" if tur == "ton" else (k if k != "ton" else "net"))
+    from .pipeline import renk, sade
+    img, native, k, soft, own = _look(image_path, os.path.getmtime(image_path), width_mm, descreen_mode)
+    kind = "ton" if tur == "ton" else "net" if tur == "net" and k == "ton" else k
     if kind == "ton":
         found = sade.find(img, width_mm, n)
     else:
-        found = find(img, n) if n is not None else own()
-        for c, (name, hx) in zip(found, match(found)):
-            c["ad"], c["hex"] = name, hx
-    return found, advice(img, native, width_mm, k, kind, num)
+        found = renk.paint(copy.deepcopy(own()) if n is None else renk.find(img, n))
+    return found, advice(img, native, width_mm, k, kind, soft)
 
 
-def advice(img, native: int, width_mm: float, k: str, kind: str, num: dict) -> dict:
+def settle(found: list, previous: list) -> list:
+    """Newly found colours as the recipe takes them: one the user had chosen by hand before stays chosen,
+    and there are always two different paints."""
+    from .pipeline import renk
+    for c in found:
+        for o in previous:
+            if o.get("elle") and max(abs(a - b) for a, b in zip(c["rgb"], o["rgb"])) < 26:
+                c.update(ad=o["ad"], hex=o["hex"], elle=True)
+    if len(unique_names(found)) >= 2:
+        return found
+    if len(found) < 2:                               # a single-colour picture needs a second paint
+        name, v = ("Beyaz", 255) if found[0]["hex"].upper() != main_hex("Beyaz") else ("Siyah", 0)
+        return found + [{"rgb": [v] * 3, "pay": 0.0, "oz": [[renk.W_L * v / 2.55, 0.0, 0.0, 0.0]], "ad": name,
+                         "hex": main_hex(name)}]
+    for c in found:
+        c.pop("elle", None)
+    return renk.paint(found)
+
+
+def advice(img, native: int, width_mm: float, k: str, kind: str, soft: float) -> dict:
     """What the user should know about this picture, in plain words."""
     from .pipeline import sade
     soz, puan = [], "iyi"
     cm = width_mm / 10
     if k == "ton":
-        puan = "zor" if num["yumusak"] > 78 else "orta"
+        puan = "zor" if soft > 78 else "orta"
         if kind == "ton":
             soz.append("Fotoğraf ya da tablo gibi çok geçişli bir görsel. Az renge ve net şekillere sadeleştirildi.")
         else:
@@ -174,20 +167,14 @@ def advice(img, native: int, width_mm: float, k: str, kind: str, num: dict) -> d
     if per_mm < 1.4:
         puan = "zor" if per_mm < 0.8 else ("orta" if puan == "iyi" else puan)
         soz.append(f"Görsel küçük ({native} piksel): en çok {max(5, int(native / 1.4 / 10))} cm genişlikte net çıkar.")
-    return {"tur": kind, "bulunan": k, "puan": puan, "soz": soz, **{a: float(b) for a, b in num.items()}}
+    return {"tur": kind, "bulunan": k, "puan": puan, "soz": soz, "yumusak": soft}
 
 
 def advise_again(r: "Recipe") -> dict:
     """The same picture at another size: what to know about it (the kind of picture does not change)."""
-    from PIL import Image
-    from .pipeline import open_rgb
+    from .pipeline.build import open_capped
     u = r.uygun
-    img = np.asarray(open_rgb(r.image_path))
-    native = img.shape[1]
-    if native > 1600:
-        img = np.asarray(Image.fromarray(img).resize((1600, max(8, round(img.shape[0] * 1600 / native))), Image.BOX))
-    num = {k: u[k] for k in ("yumusak", "sert", "uzak") if k in u}
-    return advice(img, native, r.width_mm, u["bulunan"], u["tur"], num)
+    return advice(*open_capped(r.image_path), r.width_mm, u["bulunan"], u["tur"], u["yumusak"])
 
 
 def unique_names(colours: list) -> list:
@@ -203,9 +190,8 @@ def unique_names(colours: list) -> list:
     return out
 
 
-def filament_for(name: str, hx: Optional[str] = None):
-    from .model import Filament
-    from .pipeline.renk import hex_rgb
+def filament_for(name: str, hx: Optional[str] = None) -> Filament:
+    from .pipeline.palette import hex_rgb
     hx = hx or main_hex(name)
     return Filament(name, hex_rgb(hx) if hx else (128, 128, 128), brand="")
 
@@ -320,7 +306,6 @@ class Recipe:
         p.settings = self.settings(preview=False)
         p.shapes = copy.deepcopy(self.shapes)
         p.rays_center = tuple(self.rays_center) if self.rays_center else None
-        p.owned = []
         p.light_az, p.light_el = self.light_az, self.light_el
         p.preset = self.style
         p.name = self.name
@@ -480,12 +465,11 @@ def preview_png(m, az: float, el: float) -> bytes:
     return png_bytes(render_cut(m) if m.polys is not None else render_top(m, az_deg=az, el_deg=el))
 
 
-def style_thumbnail(img: np.ndarray, r: "Recipe", s: Settings, found: Optional[dict], size: int = 300) -> bytes:
-    """A close detail in the given texture: only that part of the picture is cut, so it is quick."""
-    from PIL import Image
+def thumb_mosaic(img: np.ndarray, r: "Recipe", s: Settings, found: Optional[dict], full=None, check=None):
+    """A close detail in the given texture: only that part of the picture is cut, so it is quick.
+    full: the simplified picture's index map when it is already known. check: called now and then."""
     from scipy import ndimage as ndi
-    from .pipeline import build_mosaic, zones_from_shapes
-    from .render import render_cut
+    from .pipeline import build_mosaic, sade, zones_from_shapes
     h, w = img.shape[:2]
     side = int(min(h, w) * 0.34)
     g = img.mean(2)
@@ -500,15 +484,28 @@ def style_thumbnail(img: np.ndarray, r: "Recipe", s: Settings, found: Optional[d
     rc = r.rays_center or (found or {}).get("rays_center")
     s.rays_center = (rc[0] * w - x0, rc[1] * h - y0) if rc else None
     s.width_mm = s.width_mm * side / w
-    s.source_zoom = w / side
-    if r.colours and r.colours[0].get("yol") == "ton":   # simplified as a whole, then the detail is cut out
-        from .pipeline import sade
-        full = sade.label(img, s.source_colours, r.width_mm)
-        k = full.shape[1] / w
-        s.source_label = full[int(y0 * k):int((y0 + side) * k), int(x0 * k):int((x0 + side) * k)]
     s.descreen = False                  # img is already free of print dots
-    m = build_mosaic(img[y0:y0 + side, x0:x0 + side], s, zone[y0:y0 + side, x0:x0 + side])
+    labels = None
+    if sade.tonal(r.colours):           # simplified as a whole, then the detail is cut out
+        full = sade.label(img, r.colours, r.width_mm) if full is None else full
+        k = full.shape[1] / w
+        labels = full[int(y0 * k):int((y0 + side) * k), int(x0 * k):int((x0 + side) * k)]
+    return build_mosaic(img[y0:y0 + side, x0:x0 + side], s, zone[y0:y0 + side, x0:x0 + side], labels=labels,
+                        zoom=w / side, progress=(lambda f, msg: check()) if check else None)
+
+
+def thumb_jpeg(m, size: int = 300) -> bytes:
+    from PIL import Image
+    from .render import render_cut
     return png_bytes(np.asarray(Image.fromarray(render_cut(m, 2 * size)).resize((size, size), Image.LANCZOS)), "JPEG", 88)
+
+
+def repaint(m, palette: list):
+    """The same stones in other paints."""
+    m = copy.copy(m)
+    m.settings = copy.copy(m.settings)
+    m.settings.palette = palette
+    return m
 
 
 def _plain(obj):
@@ -598,6 +595,10 @@ class Engine:
         with self._cv:
             return self._stop or self._build is not None or any(j[0] == "detect" for j in self._jobs)
 
+    def _check(self) -> None:
+        if self.superseded():
+            raise Superseded
+
     # -------------------------------------------------- thread
     def _run(self) -> None:
         while True:
@@ -632,8 +633,7 @@ class Engine:
             return
 
         def P(f, msg):
-            if self.superseded():
-                raise Superseded
+            self._check()
             self.cb["progress"](gen, BUILD_SHARE * f, msg)
         self.cb["busy"](True, "Mozaiğe dönüştürülüyor")
         P(0.0, "Görsel okunuyor")
@@ -641,22 +641,17 @@ class Engine:
         key, shape = r.build_key(), r.build_key(True)
         found = None
         if key != self.mosaic_key and self.mosaic is not None and r.colours and shape == self.mosaic_shape:
-            m = copy.copy(self.mosaic)                # only a paint was changed: the same stones, painted anew
-            m.settings = copy.copy(m.settings)
-            m.settings.palette = r.settings(True).palette
-            self.mosaic, self.mosaic_key = m, key
+            self.mosaic, self.mosaic_key = repaint(self.mosaic, r.settings(True).palette), key    # only a paint was changed
         elif key != self.mosaic_key or self.mosaic is None:
             m, found = build_mosaic_for(r, True, self._image_cache, self._zones,
                                         progress=lambda f, msg: P(0.02 + 0.86 * max(0.0, min(1.0, f)), msg))
-            if self.superseded():
-                return
+            self._check()
             self.mosaic, self.mosaic_key, self.mosaic_shape = m, key, shape
         self.mosaic_gen = gen
         m = self.mosaic
         P(0.9, "Parça ve süre hesaplanıyor")
         est = estimates(m)
-        if self.superseded():
-            return
+        self._check()
         w_mm, h_mm = m.size_mm
         info = {
             "size_mm": [round(w_mm, 1), round(h_mm, 1)],
@@ -674,49 +669,48 @@ class Engine:
         from .export.api import scene_glb
 
         def S(f, msg=""):
-            if self.superseded():
-                raise Superseded
+            self._check()
             self.cb["progress"](gen, BUILD_SHARE + (1 - BUILD_SHARE) * 0.98 * max(0.0, min(1.0, float(f))),
                                 msg or "Taşlar tek tek kuruluyor")
         S(0.0, "Taşlar tek tek kuruluyor")
         glb, meta = scene_glb(m, None, "preview", S)
-        if self.superseded():
-            return
+        self._check()
         self.cb["scene"](gen, glb, _plain(meta))
         self._push(("plates", gen, m))
 
     def _do_plates(self, gen: int, m) -> None:
         from .export.api import plates_glb
-        if self.superseded() or m is not self.mosaic:
+        self._check()
+        if m is not self.mosaic:
             return
         pglb, pmeta = plates_glb(m, None)
-        if not self.superseded() and m is self.mosaic:
+        self._check()
+        if m is self.mosaic:
             self.cb["plates"](gen, pglb, _plain(pmeta))
 
     def _do_thumbs(self, gen: int, r: Recipe) -> None:
         if not r.image_path or not r.palette:
             return
+        from .pipeline import load_image, sade
+        full = None
         for name, _code, _d in STYLE_CARDS:
-            if self.superseded():
-                return
+            self._check()
             rr = r.copy()
             rr.style = name
             s = rr.settings(True)
-            k = (rr.build_key(), s.mm_per_px)
-            jpg = self._thumb_cache.get(k)
-            if jpg is None:
+            k = (rr.build_key(True), s.mm_per_px)
+            m = self._thumb_cache.get(k)
+            if m is None:
                 img = self._image_cache.get("img")
                 if img is None:
-                    from .pipeline import load_image
                     img = load_image(rr.image_path, s)
-                found = next(iter(self._zones.values()), None)
-                jpg = style_thumbnail(img, rr, s, found)
-                if self.superseded():
-                    return
+                if full is None and sade.tonal(rr.colours):
+                    full = sade.label(img, rr.colours, rr.width_mm)
+                m = thumb_mosaic(img, rr, s, next(iter(self._zones.values()), None), full, self._check)
                 if len(self._thumb_cache) > 24:
                     self._thumb_cache.clear()
-                self._thumb_cache[k] = jpg
-            self.cb["thumb"](gen, name, jpg)
+                self._thumb_cache[k] = m
+            self.cb["thumb"](gen, name, thumb_jpeg(repaint(m, s.palette)))
 
     def _do_advise(self, gen: int, r: Recipe) -> None:
         self.cb["advice"](r.image_path, r.width_mm, advise_again(r))

@@ -19,7 +19,6 @@ import os
 import sys
 import tempfile
 import threading
-import traceback
 from typing import Optional
 
 import numpy as np
@@ -199,7 +198,6 @@ class Bridge(QObject):
         self.store = store or QSettings("Tessera", "Tessera")
         self.blobs = BlobStore()
         self.recipe = E.Recipe()
-        self.recipe.palette = []
         self.gen = 0
         self.mosaic = None
         self.mosaic_gen = -1
@@ -283,11 +281,6 @@ class Bridge(QObject):
             # the mask is now part of the recipe: the next build key includes it (same result)
             self.engine.mosaic_key = self.recipe.build_key()
             self.engine.mosaic_shape = self.recipe.build_key(True)
-        try:
-            png = E.preview_png(m, E.LIGHT_AZ, E.LIGHT_EL)
-            info["preview"] = self.blobs.put(f"preview_{gen}.png", png, "image/png")
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
         self.last_info = info
         self.built.emit(json.dumps(info, ensure_ascii=False))
         if not self.thumbs.get("_key") == self._thumb_key():
@@ -324,33 +317,12 @@ class Bridge(QObject):
         if gen != self._await_palette:
             return                                   # found for an older picture
         self._await_palette = None
-        for c in colours:                            # a colour the user had chosen by hand stays chosen
-            for o in self.recipe.colours:
-                if o.get("elle") and max(abs(a - b) for a, b in zip(c["rgb"], o["rgb"])) < 26:
-                    c.update(ad=o["ad"], hex=o["hex"], elle=True)
-        if len({c["hex"].upper() for c in colours}) < 2:
-            colours = self._two_at_least(colours)
+        colours = E.settle(colours, self.recipe.colours)
         if len(colours) != len(self.recipe.colours):
             self.recipe.fine["taban"] = None
         self.recipe.uygun = advice
         self.recipe.use_colours(colours)
         self._changed(rebuild=True)
-
-    @staticmethod
-    def _two_at_least(colours):
-        """A single-colour picture still needs a second paint to choose."""
-        from .pipeline.renk import MAIN
-        used = {c["hex"].upper() for c in colours}
-        if len(colours) < 2:
-            n, h = next((n, h) for n, h in (MAIN[4], MAIN[0]) if h.upper() not in used)
-            return colours + [{"rgb": [255, 255, 255] if n == "Beyaz" else [0, 0, 0], "pay": 0.0,
-                               "oz": [[55.0 if n == "Beyaz" else 0.0, 0.0, 0.0, 0.0]], "ad": n, "hex": h}]
-        for c in colours:
-            c.pop("elle", None)
-        from .pipeline.renk import match
-        for c, (n, h) in zip(colours, match(colours)):
-            c["ad"], c["hex"] = n, h
-        return colours
 
     def _ui_error(self, gen, kind, msg):
         if kind == "detect":
@@ -363,8 +335,8 @@ class Bridge(QObject):
 
     def _thumb_key(self):
         r = self.recipe
-        return (r.image_path, round(r.width_mm), tuple(E.unique_names(r.colours)), json.dumps(r.fine, sort_keys=True, default=str),
-                r.zone_mask is None)
+        return (r.image_path, round(r.width_mm), tuple(E.unique_names(r.colours)),
+                json.dumps(r.fine, sort_keys=True, default=str), r.zone_mask is None)
 
     # -------------------------------------------------- state
     def state_dict(self) -> dict:
@@ -461,7 +433,6 @@ class Bridge(QObject):
         r = E.Recipe()
         r.width_mm = self.recipe.width_mm         # a width typed before the picture is kept
         r.style, r.mode, r.fine = self.recipe.style, self.recipe.mode, dict(self.recipe.fine)
-        r.fine.pop("kafes_rengi", None)
         r.fine.pop("taban", None)
         r.fine["renk_sayisi"] = None
         r.fine["tur"] = "auto"
@@ -479,15 +450,23 @@ class Bridge(QObject):
         self.plates_info = None
         self.scene_info = None
         self.last_export = None
-        self.gen += 1
         self._find_colours("Görselin renkleri bulunuyor")     # the build starts when they arrive
         self._changed(rebuild=False)
         return json.dumps({"w": iw, "h": ih})
 
     def _find_colours(self, msg: str) -> None:
+        self.gen += 1
         self._await_palette = self.gen
         self._emit_progress(0.0, msg)
         self.engine.detect(self.gen, self.recipe)
+
+    def _start_over(self, msg: str) -> None:
+        """Look for the colours again and forget what was chosen by hand."""
+        self.recipe.fine["renk_sayisi"] = None
+        for c in self.recipe.colours:
+            c.pop("elle", None)
+        self._find_colours(msg)
+        self._emit_state()
 
     @Slot(float)
     def setWidth(self, cm: float) -> None:  # noqa: N802
@@ -501,72 +480,55 @@ class Bridge(QObject):
 
     @Slot(int, str)
     def setColour(self, i: int, value: str) -> None:  # noqa: N802
-        """Which paint stands for the picture's i-th colour: a main colour's name, "#rrggbb",
-        "gorsel" (exactly as in the picture) or "" (the program's own choice)."""
+        """Which paint stands for the picture's i-th colour: a main colour's name, "#rrggbb" or
+        "gorsel" (exactly as in the picture)."""
         cols = [dict(c) for c in self.recipe.colours]
         if not 0 <= i < len(cols):
             return
-        from .pipeline.renk import match, name_of
+        from .pipeline.palette import hex_rgb
+        from .pipeline.renk import name_of
         c = cols[i]
-        if value == "":
-            c["ad"], c["hex"] = match(cols)[i]        # (simplified pictures are reset as a whole)
-            c.pop("elle", None)
-        elif E.main_hex(value):
+        if E.main_hex(value):
             c.update(ad=value, hex=E.main_hex(value), elle=True)
         elif value == "gorsel":
             c.update(ad=name_of(c["rgb"]), hex=E.rgb_hex(c["rgb"]), elle=True)
         elif len(value) == 7 and value[0] == "#":
             try:
-                rgb = [int(value[k:k + 2], 16) for k in (1, 3, 5)]
+                c.update(ad=name_of(hex_rgb(value)), hex=value.upper(), elle=True)
             except ValueError:
                 return
-            c.update(ad=name_of(rgb), hex=value.upper(), elle=True)
         else:
             return
-        if len({x["hex"].upper() for x in cols}) < 2:
+        paints = len(E.unique_names(cols))
+        if paints < 2:
             self.toast.emit("En az iki farklı renk kalmalı.")
             self._emit_state()
             return
         if c == self.recipe.colours[i]:
             return
-        if len({x["hex"].upper() for x in cols}) != len(self.recipe.palette):
+        if paints != len(self.recipe.palette):
             self.recipe.fine["taban"] = None          # two colours became one (or one became two)
         self.recipe.use_colours(cols)
         self._changed()
 
     @Slot(int)
     def setColourCount(self, n: int) -> None:  # noqa: N802
-        """How many colours to look for; 0 = as many as the picture has."""
-        if not self.recipe.image_path:
-            return
-        self.recipe.fine["renk_sayisi"] = None if n <= 0 else max(2, min(12, int(n)))
-        self.gen += 1
-        self._find_colours("Renkler yeniden ayrılıyor")
-        self._emit_state()
+        if self.recipe.image_path:
+            self.recipe.fine["renk_sayisi"] = max(2, min(12, int(n)))
+            self._find_colours("Renkler yeniden ayrılıyor")
+            self._emit_state()
 
     @Slot(str)
     def setKind(self, tur: str) -> None:  # noqa: N802
-        """"auto" | "net" (cut as it is) | "ton" (simplify first)."""
-        if not self.recipe.image_path or tur not in ("auto", "net", "ton"):
-            return
-        self.recipe.fine["tur"] = tur
-        self.recipe.fine["renk_sayisi"] = None
-        for c in self.recipe.colours:
-            c.pop("elle", None)
-        self.gen += 1
-        self._find_colours("Sadeleştiriliyor" if tur == "ton" else "Görselin renkleri bulunuyor")
-        self._emit_state()
+        """"net" (cut as it is) or "ton" (simplify first)."""
+        if self.recipe.image_path and tur in ("net", "ton"):
+            self.recipe.fine["tur"] = tur
+            self._start_over("Sadeleştiriliyor" if tur == "ton" else "Görselin renkleri bulunuyor")
 
     @Slot()
     def resetColours(self) -> None:  # noqa: N802
-        if not self.recipe.image_path:
-            return
-        self.recipe.fine["renk_sayisi"] = None
-        for c in self.recipe.colours:
-            c.pop("elle", None)
-        self.gen += 1
-        self._find_colours("Görselin renkleri bulunuyor")
-        self._emit_state()
+        if self.recipe.image_path:
+            self._start_over("Görselin renkleri bulunuyor")
 
     @Slot(str)
     def setStyle(self, name: str) -> None:  # noqa: N802
@@ -763,7 +725,6 @@ class Bridge(QObject):
             self._changed(rebuild=True)
         else:                                        # saved before the program knew the picture's colours
             r.fine["renk_sayisi"] = None
-            self.gen += 1
             self._find_colours("Görselin renkleri bulunuyor")
         self.dirty = False
         self._emit_state()

@@ -289,12 +289,10 @@ function showPart(m) {
   $('#part-code').textContent = m.code;
   $('#part-sw').style.background = m.hex;
   $('#part-colour').textContent = m.colour_name;
-  $('#part-colour').title = m.colour_name;
   const [w, h, d] = m.size_mm;
   $('#part-size').textContent = `${fmt0.format(w)} × ${fmt0.format(h)} mm, ${fmt1.format(d)} mm yükseklik`;
   $('#part-panel').textContent = m.template_page ? `sayfa ${m.template_page} · panel ${m.panel}` : m.panel;
-  const pl = m.plate || plateOf[m.code];
-  $('#part-plate').textContent = pl ? pl : 'tablalar diziliyor…';
+  $('#part-plate').textContent = m.plate || plateOf[m.code] || 'tablalar diziliyor…';
 }
 
 // ------------------------------------------------------------------ converting overlay

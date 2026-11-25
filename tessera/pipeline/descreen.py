@@ -137,8 +137,9 @@ def descreen(img: np.ndarray, mode: DescreenMode = "auto", *, min_area_frac: flo
     ``max_period_px``: patterns coarser than this are real content (window grids, tiles), not a
     print screen. Callers pass ~5 mm expressed in pixels of ``img``: a dot pattern finer than
     that cannot be printed as separate pieces anyway."""
+    same = (img, np.zeros(img.shape[:2], np.float32)) if return_mask else img
     if mode is False or mode is None or (isinstance(mode, str) and mode.lower() in ("false", "off", "kapali", "no")):
-        return (img, np.zeros(img.shape[:2], np.float32)) if return_mask else img
+        return same
     mask, period = screen_map(img)
     frac = float((mask > 0.5).mean())
     # coarse screens (dots ~6 mm apart): look again at half resolution, where the window holds
@@ -151,16 +152,16 @@ def descreen(img: np.ndarray, mode: DescreenMode = "auto", *, min_area_frac: flo
         if p2 > 0 and f2 > max(1.5 * frac, frac + 0.05, 0.0 if mode is True else 0.2) and 2 * p2 <= max_period_px:
             mask = np.asarray(Image.fromarray(m2).resize((w, h), Image.BILINEAR))
             period, frac = 2 * p2, f2
-    if period <= 0 or period > max_period_px or (mode == "auto" and frac < min_area_frac):
-        return (img, np.zeros(img.shape[:2], np.float32)) if return_mask else img
-    if mode == "auto" and not is_screen(_lum(img), mask > 0.5):
-        return (img, np.zeros(img.shape[:2], np.float32)) if return_mask else img
+    if period <= 0 or period > max_period_px:
+        return same
+    L = _lum(img)
+    if mode == "auto" and (frac < min_area_frac or not is_screen(L, mask > 0.5)):
+        return same
     period = float(np.clip(period, 2.0, max(2.0, max_period_px)))
     sigma = 0.55 * period
     a = img.astype(np.float32)
     # protect real ink: pixels on long straight-ish dark runs (lines) or in solid blacks. Screen
     # dots are short in every direction, so they are not protected.
-    L = _lum(img)
     dark = L < 110
     local_dark = ndi.uniform_filter(dark.astype(np.float32), int(2 * period) | 1)
     score, arg = _line_score(dark, int(round(1.7 * period)))

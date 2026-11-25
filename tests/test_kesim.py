@@ -147,3 +147,16 @@ def test_opening_card_comes_before_the_window():
     html = open(os.path.join("tessera", "web", "index.html"), encoding="utf-8").read()
     assert 'id="splash"' not in html and "Gelişmiş ayarlar" in html and "İnce ayar" not in html
     assert json.dumps([c["name"] for c in E.style_cards()], ensure_ascii=False) == '["Mozaik", "Kırık taş", "Blok", "İri parça"]'
+
+
+def test_remembered_colour_areas_change_nothing():
+    """Another texture starts from the remembered areas; the stones must be the ones a fresh run gives."""
+    from tessera.pipeline import kesim
+    im, pal = face(), np.array([f.rgb for f in PAL])
+    kesim.build(im, 150, pal, layout="mozaik")
+    again = kesim.build(im, 150, pal, layout="blok")
+    kesim._AREAS.clear()
+    fresh = kesim.build(im, 150, pal, layout="blok")
+    assert [p.wkb for p in again["polys"]] == [p.wkb for p in fresh["polys"]]
+    other = kesim.build(im[:, ::-1].copy(), 150, pal, layout="blok")             # another picture is not mixed up
+    assert [p.wkb for p in other["polys"]] != [p.wkb for p in fresh["polys"]]

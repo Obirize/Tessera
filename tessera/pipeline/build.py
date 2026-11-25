@@ -34,6 +34,21 @@ SCREEN_MAX_MM = 9.0   # dot patterns finer than this (in the finished mosaic) co
 SCREEN_MIN_AREA = 0.04   # a dotted print covers real areas; a smaller "screen" is an ornament
 
 
+def screen_free(img: np.ndarray, mode, width_mm: float, **kw):
+    """img (the whole picture, width_mm wide in the end) without its print dots."""
+    return descreen_image(img, mode, max_period_px=SCREEN_MAX_MM / (width_mm / img.shape[1]),
+                          min_area_frac=SCREEN_MIN_AREA, **kw)
+
+
+def open_capped(path, side: int = 1600) -> tuple:
+    """(picture at most ``side`` px wide, its original width)"""
+    img = np.asarray(open_rgb(path))
+    native = img.shape[1]
+    if native > side:
+        img = np.asarray(Image.fromarray(img).resize((side, max(8, round(img.shape[0] * side / native))), Image.BOX))
+    return img, native
+
+
 _SCREEN_MEMO: dict = {}   # fingerprint of a loaded working image -> screen mask at working size
 
 
@@ -125,10 +140,9 @@ def load_image(path_or_img, settings: Settings, *, descreen=None,
     if mode is not False:
         if im.width > 2.5 * w_px:   # keep descreening fast on huge scans
             im = im.resize((int(2.5 * w_px), max(8, int(round(im.height * 2.5 * w_px / im.width)))), Image.BOX)
-        px_mm = settings.width_mm / im.width
         if progress:
             progress(0.4, "Tram çözülüyor")
-        arr, smask = descreen_image(np.asarray(im), mode, max_period_px=SCREEN_MAX_MM / px_mm, min_area_frac=SCREEN_MIN_AREA, return_mask=True)
+        arr, smask = screen_free(np.asarray(im), mode, settings.width_mm, return_mask=True)
         im = Image.fromarray(arr)
     else:
         smask = None
@@ -314,7 +328,7 @@ def _check_zone(zone_map, settings: Settings, hw) -> np.ndarray:
 def build_mosaic(image, settings: Settings, zone_map: Optional[np.ndarray] = None, *,
                  source=None, detail: bool = True, andamento: Optional[bool] = None, descreen=None,
                  progress: Optional[Callable[[float, str], None]] = None,
-                 timings: Optional[dict] = None, budget: bool = True) -> Mosaic:
+                 timings: Optional[dict] = None, budget: bool = True, labels=None, zoom: float = 1.0) -> Mosaic:
     """Image -> Mosaic.
 
     Optional keyword arguments (all default to the best quality):
@@ -331,6 +345,8 @@ def build_mosaic(image, settings: Settings, zone_map: Optional[np.ndarray] = Non
     - ``progress``: callback(fraction, message_tr); fractions rise monotonically from 0 to 1 over
       loading/descreening, colours, tiling (one update per zone type), merging, relief and done.
     - ``timings``: dict that receives seconds per stage.
+    - ``labels``, ``zoom``: for a detail of a picture (cut-first textures only): index map into
+      ``settings.source_colours``; how many times wider the whole picture is.
     - ``budget``: apply the relief hierarchy and weight budget (R2-2; see relief.py).
     For a fast UI preview, run with ``settings.mm_per_px = 0.8``.
     """
@@ -373,7 +389,8 @@ def build_mosaic(image, settings: Settings, zone_map: Optional[np.ndarray] = Non
     if k < 2:
         raise ValueError("En az 2 farklı renk gerekli: bütün renkler aynı seçilmiş.")
     if getattr(settings, "style", None) in LAYOUTS and not getattr(settings, "merge_same_colour", False):
-        return _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, mark, report)
+        return _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, mark, report,
+                            labels, zoom)
     min_feat_mm = float(getattr(settings, "min_feature_mm", 1.6))
     min_part_mm2 = float(getattr(settings, "min_part_mm2", 12.0))
     bc = getattr(settings, "backing_colour", None)
@@ -554,7 +571,7 @@ def _gap_band(lab: np.ndarray, gw: int) -> np.ndarray:
     return gap
 
 
-def _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, mark, report):
+def _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, mark, report, labels, zoom):
     """R8: cut-first stones. The outlines are exact polygons; the rasters only serve numbers and zones."""
     from . import kesim
     h, w = img.shape[:2]
@@ -564,8 +581,7 @@ def _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, 
     if src.shape[1] > 2400:
         src = np.asarray(Image.fromarray(src).resize((2400, int(round(src.shape[0] * 2400 / src.shape[1]))), Image.BOX))
     if ds_mode is not False:
-        src = descreen_image(src, ds_mode, max_period_px=SCREEN_MAX_MM / (w * settings.mm_per_px / src.shape[1]),
-                             min_area_frac=SCREEN_MIN_AREA)
+        src = screen_free(src, ds_mode, w * settings.mm_per_px)
     mark("girdi", 0.06, "Renkler ayrılıyor")
     zone = _check_zone(zone_map, settings, (h, w))
     rc = settings.rays_center
@@ -577,9 +593,8 @@ def _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, 
         pf = _check_palette(settings)
         same = np.array([int(np.flatnonzero((pal == c).all(1))[0]) for c in pf])
         to = same[np.clip(np.asarray([int(c["hedef"]) for c in cols]), 0, len(pf) - 1)]
-    r = kesim.build(src, w * settings.mm_per_px, pal, colours=cols, to=to,
-                    zoom=float(getattr(settings, "source_zoom", 1.0)),
-                    labels=getattr(settings, "source_label", None), layout=settings.style, zone=zone, centre=centre,
+    r = kesim.build(src, w * settings.mm_per_px, pal, colours=cols, to=to, zoom=zoom, labels=labels,
+                    layout=settings.style, zone=zone, centre=centre,
                     gap=float(settings.gap_mm), size=float(getattr(settings, "stone_scale", 1.0)),
                     seed=int(settings.seed), ams=ams, report=lambda f, m: report(0.06 + 0.88 * f, m))
     polys, pc, pz = r["polys"], to_full[r["colour"]], r["zone"]

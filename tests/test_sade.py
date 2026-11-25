@@ -43,7 +43,7 @@ def test_flat_art_is_never_simplified():
               "demir_maske/kaynak.png", "ankara_kedisi/kaynak.png"):
         p = os.path.join(ROOT, "ornekler", f)
         if os.path.exists(p):
-            im = renk._shrink(np.asarray(open_rgb(p)), 1200)
+            im = renk.shrink(np.asarray(open_rgb(p)), 1200)
             assert sade.kind(im, own(im))[0] == "net", f
 
 

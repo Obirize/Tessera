@@ -14,6 +14,8 @@ shrunk by half the joint. The same polygons are used for preview, 3D, template a
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from concurrent.futures import ThreadPoolExecutor
 
@@ -38,19 +40,15 @@ def resolution(width_mm: float) -> float:
 
 
 # ------------------------------------------------------------------ colour areas
-def _lab(rgb):
-    from .palette import rgb_to_lab
-    return np.asarray(rgb_to_lab(np.asarray(rgb, np.uint8).reshape(-1, 3)), float).reshape(-1, 3)
-
-
 def image_colours(img: np.ndarray, pal: np.ndarray):
     """The picture's own colours and the palette colour each one becomes (distinct when possible)."""
     from . import renk
+    from .palette import rgb_to_lab
     found = renk.find(img)
     if len(found) > len(pal):
         found = renk.find(img, len(pal))
-    rgb = np.array([c["rgb"] for c in found])
-    cost = np.linalg.norm(_lab(rgb)[:, None] - _lab(pal)[None], axis=2)
+    a, b = (rgb_to_lab(np.asarray(v, np.uint8)) for v in ([c["rgb"] for c in found], pal))
+    cost = np.linalg.norm(a[:, None] - b[None], axis=2)
     to = cost.argmin(1)
     if len(found) <= len(pal):
         r, c = linear_sum_assignment(cost)
@@ -351,6 +349,39 @@ def _parts(g):
 
 
 # ------------------------------------------------------------------ the whole thing
+_AREAS: dict = {}        # the newest picture's colour areas: another texture or stone size starts from them
+
+
+def _areas(img, width_mm, size, colours, to, lum, zoom, labels) -> np.ndarray:
+    """Palette index of every fine pixel (size = W, H): areas that can be cut."""
+    from . import renk, sade
+    key = None
+    if labels is None and zoom == 1.0:
+        oz = json.dumps([[c["oz"], c.get("yol", "")] for c in colours])
+        key = (hashlib.blake2b(img.tobytes()).digest(), img.shape, width_mm, size, oz, to.tobytes(), lum.tobytes())
+        if key in _AREAS:
+            return _AREAS[key].copy()
+    W, H = size
+    res, n = width_mm / W, len(lum)
+    if labels is not None:
+        lab = np.asarray(labels)
+    elif sade.tonal(colours):
+        lab = sade.label(img, colours, width_mm)
+    else:
+        cw = int(min(W, np.clip(img.shape[1], 900 / zoom, 1500 / zoom)))
+        ch = max(8, int(round(H * cw / W)))
+        im = np.asarray(Image.fromarray(img).resize((cw, ch), Image.BICUBIC if cw >= img.shape[1] else Image.BOX))
+        lab = renk.label(im, colours, cw * zoom)
+    lab = to[renk.enlarge(lab, len(colours), (W, H))].astype(np.int16)
+    lab = drop_specks(lab, n, 0.8 / res ** 2)
+    lab = widen_thin(lab, [int(i) for i in np.argsort(np.abs(lum - 128))], res)
+    lab = drop_specks(lab, n, MIN_A / res ** 2)
+    if key is not None:
+        _AREAS.clear()
+        _AREAS[key] = lab.copy()
+    return lab
+
+
 def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik", zone=None, centre=None,
           gap=0.4, size=1.0, seed=7, ams=False, report=None, colours=None, to=None, zoom=1.0,
           labels=None) -> dict:
@@ -358,7 +389,6 @@ def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik",
     centre as 0..1 fractions. colours/to: the picture's colours (renk.find) and the palette index of
     each; found here when missing. zoom: > 1 when img is only a part of the picture. labels: index map
     into colours when it is already known."""
-    from . import renk
     report = report or (lambda f, m: None)
     rng = np.random.default_rng(seed)
     res = resolution(width_mm)
@@ -368,29 +398,13 @@ def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik",
     report(0.03, "Renkler ayrılıyor")
     if colours is None:
         colours, to = image_colours(img, pal)
-    im = None
-    if labels is not None:
-        lab = np.asarray(labels)
-    elif colours[0].get("yol") == "ton":
-        from . import sade
-        lab = sade.label(img, colours, width_mm)
-    else:
-        cw = int(min(W, np.clip(img.shape[1], 900 / zoom, 1500 / zoom)))
-        ch = max(8, int(round(H * cw / W)))
-        im = np.asarray(Image.fromarray(img).resize((cw, ch), Image.BICUBIC if cw >= img.shape[1] else Image.BOX))
-        lab = renk.label(im, colours, cw * zoom)
-    report(0.12, "Renkler ayrılıyor")
-    lab = np.asarray(to)[renk.enlarge(lab, len(colours), (W, H))].astype(np.int16)
-    del im
     n = len(pal)
     # the picture's own lightness (not the chosen paint) decides the order, so repainting moves no stone
     lum = np.zeros(n)
     for i in range(n):
         own = [c["rgb"] for c, t in zip(colours, to) if t == i]
         lum[i] = np.mean(own or [pal[i]], axis=0) @ np.array([.3, .59, .11])
-    lab = drop_specks(lab, n, 0.8 / res ** 2)
-    lab = widen_thin(lab, [int(i) for i in np.argsort(np.abs(lum - 128))], res)
-    lab = drop_specks(lab, n, MIN_A / res ** 2)
+    lab = _areas(img, width_mm, (W, H), colours, np.asarray(to), lum, zoom, labels)
     report(0.25, "Taşlar kesiliyor")
 
     z = np.zeros((H, W), np.int8)

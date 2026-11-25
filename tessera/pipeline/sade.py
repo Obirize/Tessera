@@ -3,72 +3,65 @@
 A mosaic has a handful of paints and no soft transitions. So, before anything is cut,
 1. the tones are spread out (a dark painting would otherwise be one dark field),
 2. strokes, fur and grain are smoothed away, edges stay,
-3. the few MAIN colours that show the picture best are chosen; small parts that stand out (lips, a pearl,
+3. the few paints (renk.TONES) that show the picture best are chosen; small parts that stand out (lips, a pearl,
    lights) count more than their size,
 4. shapes that are too small for how little they stand out are given to their neighbour.
 
-simplify(...) is only used for pictures that need it (see kind()); flat art never comes through here.
+kind() decides which pictures need it; flat art never comes through here.
+
+find(img, width_mm)            -> like renk.find, every colour marked "yol": "ton"
+label(img, colours, width_mm)  -> index map of the simplified picture
 """
 from __future__ import annotations
 
 import numpy as np
-from PIL import Image
 from scipy import ndimage as ndi
 
-from . import renk
-from .palette import rgb_to_lab
+from .renk import TONES, WORK as FLAT_WORK, _stats, blur, cells, guided, lab32, paint_lab, shrink, spread_in
+from .renk import label as flat_label
+from .tiling import _adjacency, split_components
 
 WORK = 1000             # px, the size everything here happens at
 SOFT_ALWAYS_FLAT = 30.0  # up to this share (%) of soft transitions a picture is flat art, no questions asked
 MAX_PAINTS = 8
 
 
-def _lab(rgb) -> np.ndarray:
-    rgb = np.asarray(rgb)
-    return np.asarray(rgb_to_lab(np.clip(rgb, 0, 255).astype(np.uint8).reshape(-1, 3)), np.float32).reshape(rgb.shape)
+def tonal(colours: list) -> bool:
+    """Whether these colours were found by this module."""
+    return bool(colours) and colours[0].get("yol") == "ton"
 
 
 # ------------------------------------------------------------------ what kind of picture is it
-def softness(img: np.ndarray) -> float:
-    """Share (%) of the picture that is neither a flat area nor a sharp edge: gradients, strokes, grain."""
-    im = renk._shrink(img, 900).astype(np.float32)
-    x = np.stack([ndi.gaussian_filter(im[..., i], 1.0) for i in range(3)], -1)
-    g = _lab(x)[..., 0]
-    rng = ndi.maximum_filter(g, 5) - ndi.minimum_filter(g, 5)
-    return 100 * float(((rng > 3.5) & (rng < 25)).mean())
-
-
 def kind(img: np.ndarray, colours) -> tuple:
-    """("net" | "cizim" | "ton", numbers). colours: () -> renk.find(img), only asked for when needed.
+    """("net" | "cizim" | "ton", softness %). colours: () -> renk.find(img), only asked for when needed.
     net    flat art: posters, logos, vector drawings       -> cut as it is
     cizim  drawn or printed with lines, on toned paper     -> cut as it is
-    ton    photographs and paintings                       -> simplified first"""
-    soft = softness(img)
+    ton    photographs and paintings                       -> simplified first
+    Softness is the share of the picture that is neither a flat area nor a sharp edge: gradients, strokes, grain."""
+    im = shrink(img, FLAT_WORK)
+    lab = lab32(blur(im.astype(np.float32), 1.0))
+    rng = spread_in(lab[..., 0], 5)
+    soft = 100 * float(((rng > 3.5) & (rng < 25)).mean())
     if soft < SOFT_ALWAYS_FLAT:
-        return "net", {"yumusak": round(soft, 1)}
-    im = renk._shrink(img, 900)
-    g = ndi.gaussian_filter(_lab(im)[..., 0], 0.7)
-    rng = ndi.maximum_filter(g, 5) - ndi.minimum_filter(g, 5)
-    hard = 100 * float((rng > 25).sum() / max((rng > 3.5).sum(), 1))
-    if hard < 22:                                # hardly a sharp edge anywhere
-        return "ton", {"yumusak": round(soft, 1), "sert": round(hard, 1)}
+        return "net", soft
+    rng = spread_in(ndi.gaussian_filter(lab32(im)[..., 0], 0.7), 5)
+    if 100 * float((rng > 25).sum() / max((rng > 3.5).sum(), 1)) < 22:      # hardly a sharp edge anywhere
+        return "ton", soft
     # how far the picture is from the few colours found in it
     colours = colours()
-    L = renk.label(im, colours)
-    lab = _lab(np.stack([ndi.gaussian_filter(im[..., i].astype(np.float32), 1.0) for i in range(3)], -1))
+    L = flat_label(im, colours)
     mu = np.array([lab[L == i].mean(0) if (L == i).any() else (0, 0, 0) for i in range(len(colours))])
     far = float(np.percentile(np.linalg.norm(lab - mu[L], axis=2), 90))
-    k = "cizim" if far < 21.5 else "ton"
-    return k, {"yumusak": round(soft, 1), "sert": round(hard, 1), "uzak": round(far, 1)}
+    return "cizim" if far < 21.5 else "ton", soft
 
 
 def thin_lines(img: np.ndarray, width_mm: float) -> tuple:
     """(share of the picture that is thin dark line, typical line width mm)"""
-    im = renk._shrink(img, 1600)
+    im = shrink(img, 1600)
     mm = width_mm / im.shape[1]
-    g = _lab(im)[..., 0]
+    g = lab32(im)[..., 0]
     r = max(3, int(round(2.4 / mm)) | 1)
-    dark = ndi.minimum_filter(ndi.maximum_filter(g, r), r) - g > 18
+    dark = ndi.grey_closing(g, r) - g > 18
     if dark.mean() < 0.004:
         return 0.0, 9.0
     dt = ndi.distance_transform_edt(dark)
@@ -94,32 +87,23 @@ def spread(img: np.ndarray) -> np.ndarray:
     return np.clip(y, 0, 255)
 
 
-def smooth(x: np.ndarray, r: int, it: int = 3, eps: float = 70.0) -> np.ndarray:
+def smooth(x: np.ndarray, r: int) -> np.ndarray:
     """Edge-keeping smoothing (guided by its own colour channels together)."""
-    m = 2 * r + 1
-    for _ in range(it):
+    for _ in range(3):
         I = x @ np.array([.4, .4, .2], np.float32)
-        mI = ndi.uniform_filter(I, m)
-        v = np.maximum(ndi.uniform_filter(I * I, m) - mI * mI, 0)
-        out = []
-        for c in range(3):
-            p = x[..., c]
-            mp = ndi.uniform_filter(p, m)
-            a = (ndi.uniform_filter(I * p, m) - mI * mp) / (v + eps)
-            b = mp - a * mI
-            out.append(ndi.uniform_filter(a, m) * I + ndi.uniform_filter(b, m))
-        x = np.stack(out, -1)
+        st = _stats(I, r)
+        x = np.stack([guided(I, st, x[..., c], r, 70.0) for c in range(3)], -1)
     return x
 
 
 def prepare(img: np.ndarray, width_mm: float) -> tuple:
     """Simplified picture in Lab (WORK px), mm per px."""
-    im = renk._shrink(img, WORK)
+    im = shrink(img, WORK)
     mm = width_mm / im.shape[1]
     x = spread(im)
     x = np.stack([ndi.median_filter(x[..., i], 3) for i in range(3)], -1)
     x = smooth(x, int(np.clip(round(1.3 / mm), 2, 6)))
-    return vivid(_lab(x)), mm
+    return vivid(lab32(x)), mm
 
 
 def vivid(lab: np.ndarray) -> np.ndarray:
@@ -134,33 +118,18 @@ def vivid(lab: np.ndarray) -> np.ndarray:
 def importance(lab: np.ndarray, mm: float) -> np.ndarray:
     """How much every pixel stands out from what lies around it (1 = not at all)."""
     s = 9.0 / mm
-    far = np.stack([ndi.gaussian_filter(lab[..., i], s, truncate=2.0) for i in range(3)], -1)
+    far = blur(lab, s, truncate=2.0)
     d = np.linalg.norm((lab - far) * np.array([0.7, 1.3, 1.3]), axis=2)
     return 1 + np.clip((d - 12) / 14, 0, 4)
-
-
-# tones between the main colours: a face or a dark painting cannot do without them
-TONES = renk.MAIN + [("Ten rengi", "#E3B892"), ("Koyu kahve", "#3A281D"), ("Kiremit", "#A34A32"),
-                     ("Zeytin yeşili", "#6C6A3B"), ("Duman mavisi", "#6C8AA5")]
-
-
-def _paints():
-    h = [x for _, x in TONES]
-    return np.asarray(rgb_to_lab(np.array([renk.hex_rgb(v) for v in h], np.uint8)), float).reshape(-1, 3)
 
 
 WT = np.array([1.15, 0.95, 0.95])        # light and dark carry the picture, hue comes second
 
 
 def choose(lab: np.ndarray, w: np.ndarray, n=None) -> list:
-    """Which MAIN paints show this picture best: greedy, then swapped while that helps."""
-    P = _paints()
-    q = np.round(lab.reshape(-1, 3) / 4.0).astype(np.int64)
-    q -= q.min(0)
-    m = q.max(0) + 1
-    key = (q[:, 0] * m[1] + q[:, 1]) * m[2] + q[:, 2]
-    _, inv = np.unique(key, return_inverse=True)
-    inv = inv.ravel()
+    """Which of the TONES show this picture best: greedy, then swapped while that helps."""
+    P = paint_lab(TONES)
+    inv, _ = cells(lab.reshape(-1, 3), 4.0)
     ww = np.bincount(inv, w.ravel())
     cell = np.stack([np.bincount(inv, (lab[..., i] * w).ravel()) for i in range(3)], 1) / ww[:, None]
     D = np.linalg.norm((cell[:, None] - P[None]) * WT, axis=2) ** 1.4
@@ -171,7 +140,7 @@ def choose(lab: np.ndarray, w: np.ndarray, n=None) -> list:
     near = np.linalg.norm((P[:, None] - P[None]) * WT, axis=2) < 16.5     # two paints nobody can tell apart: one is enough
 
     def free(sel):
-        return [j for j in range(len(P)) if j not in sel and not near[j][sel].any()]
+        return [j for j in range(len(P)) if not near[j][sel].any()]
     sel: list = []
     base = None
     while len(sel) < (n or MAX_PAINTS):
@@ -188,11 +157,10 @@ def choose(lab: np.ndarray, w: np.ndarray, n=None) -> list:
             better = False
             for a in range(len(sel)):
                 for j in free(sel[:a] + sel[a + 1:]):
-                    if j not in sel:
-                        t = sel[:a] + [j] + sel[a + 1:]
-                        ct = cost(t)
-                        if ct < c - 1e-9:
-                            sel, c, better = t, ct, True
+                    t = sel[:a] + [j] + sel[a + 1:]
+                    ct = cost(t)
+                    if ct < c - 1e-9:
+                        sel, c, better = t, ct, True
         base = c
     return sel
 
@@ -201,10 +169,10 @@ def find(img: np.ndarray, width_mm: float, n=None) -> list:
     """Like renk.find, but for tones: [{"rgb", "pay", "oz", "yol": "ton", "ad", "hex"}]."""
     lab, mm = prepare(img, width_mm)
     sel = choose(lab, importance(lab, mm), n)
-    P = _paints()
+    P = paint_lab(TONES)
     cols = [{"oz": [[float(v) for v in P[i]]], "yol": "ton", "ad": TONES[i][0], "hex": TONES[i][1]} for i in sel]
     L = label_lab(lab, cols, mm)
-    im = renk._shrink(img, WORK)
+    im = shrink(img, WORK)
     out = []
     for i, c in enumerate(cols):
         s = L == i
@@ -217,35 +185,22 @@ def find(img: np.ndarray, width_mm: float, n=None) -> list:
     return out
 
 
-def merge_weak(L: np.ndarray, P: np.ndarray, mm: float, min_mm2: float = 9.0) -> np.ndarray:
+def merge_weak(L: np.ndarray, P: np.ndarray, mm: float) -> np.ndarray:
     """Every shape has to earn its place: the less it differs from its neighbour, the larger it must be."""
     for _ in range(4):
-        # connected shapes of one paint
-        lab = np.zeros(L.shape, np.int32)
-        n = 0
-        for c in range(len(P)):
-            cc, k = ndi.label(L == c)
-            lab[cc > 0] = cc[cc > 0] + n
-            n += k
-        lab -= 1
+        lab = split_components(L.astype(np.int32))       # connected shapes of one paint
+        n = int(lab.max()) + 1
         area = np.bincount(lab.ravel(), minlength=n) * mm * mm
         col = np.zeros(n, int)
         col[lab.ravel()] = L.ravel()
-        pa, pb = [], []
-        for s1, s2 in (((slice(None), slice(None, -1)), (slice(None), slice(1, None))),
-                       ((slice(None, -1), slice(None)), (slice(1, None), slice(None)))):
-            k = lab[s1] != lab[s2]
-            pa.append(lab[s1][k])
-            pb.append(lab[s2][k])
-        a, b = np.concatenate(pa + pb), np.concatenate(pb + pa)
-        pair, cnt = np.unique(a.astype(np.int64) * n + b, return_counts=True)
-        x, y = pair // n, pair % n
+        lo, hi, cnt = _adjacency(lab, n)
+        x, y, cnt = np.r_[lo, hi], np.r_[hi, lo], np.r_[cnt, cnt]
         d = np.linalg.norm((P[col[x]] - P[col[y]]) * WT, axis=1)
-        need = np.clip(min_mm2 * (46.0 / np.maximum(d, 8.0)) ** 2.1, min_mm2, 300.0)
+        need = np.clip(9.0 * (46.0 / np.maximum(d, 8.0)) ** 2.1, 9.0, 300.0)      # mm2
         # the neighbour it is most like, weighted by how long they touch
-        score = cnt / np.maximum(d, 6.0) ** 1.3
-        o = np.lexsort((score, x))
-        x, y, need, last = x[o], y[o], need[o], np.r_[x[o][1:] != x[o][:-1], True]
+        o = np.lexsort((y, cnt / np.maximum(d, 6.0) ** 1.3, x))
+        x, y, need = x[o], y[o], need[o]
+        last = np.r_[x[1:] != x[:-1], True]
         x, y, need = x[last], y[last], need[last]
         weak = (area[x] < need) & ((area[y] > area[x]) | ((area[y] == area[x]) & (y > x)))
         if not weak.any():
@@ -266,7 +221,7 @@ def label_lab(lab: np.ndarray, colours: list, mm: float) -> np.ndarray:
     mG = [ndi.uniform_filter(g, m) for g in G]
     var = sum(ndi.uniform_filter(g * g, m) - q * q for g, q in zip(G, mG))
     stay = np.clip(var / (var + 14.0), 0, 1)                    # 0 = calm, 1 = an edge runs through here
-    stay = ndi.minimum_filter(ndi.maximum_filter(stay, 3), 3)
+    stay = ndi.grey_closing(stay, 3)
     out = []
     for p in P:
         c = np.minimum(np.linalg.norm((lab - p) * WT, axis=2), 70.0).astype(np.float32)
