@@ -4,8 +4,13 @@ The background is found on the picture's own colour areas: the colour that runs 
 the areas of it that the edge reaches. A clear verdict says when this cannot be trusted; then nothing is taken
 away and the user picks the areas by clicking.
 
-zemin: {"tiklar": [[x, y, "tek"|"renk"], ...]}   clicks as fractions of the frame (the cut part of the picture);
-       "tek" turns one area, "renk" every area of that colour. None = the background stays.
+zemin: {"tiklar": [[x, y, "tek"|"renk"], ...],   clicks as fractions of the frame (the cut part of the picture);
+                                                 "tek" turns one area, "renk" every area of that colour
+        "cizgiler": [["kalsin"|"gitsin", [[x, y], ...]], ...]}   photographs: lines drawn over what stays / goes
+       None = the background stays.
+
+Photographs and paintings (experimental) are cut differently: colour models of figure and background and a
+minimum cut, steered by the lines the user draws.
 """
 from __future__ import annotations
 
@@ -13,6 +18,7 @@ import json
 import math
 import os
 from functools import lru_cache
+from typing import Optional
 
 import numpy as np
 from PIL import Image
@@ -21,6 +27,8 @@ from scipy import ndimage as ndi
 SIDE = 1000              # px, longest side the background is looked for at
 NOMINAL_MM = 300.0       # the sizes below are meant at this width: the result does not change with the size
 MAX_CLICKS = 200
+MAX_LINES, MAX_POINTS = 60, 400
+LINE_W = 0.02            # a drawn line is this wide, as a share of the frame's longer side
 EIGHT = np.ones((3, 3), bool)
 
 
@@ -36,7 +44,16 @@ def clean(z):
         except (TypeError, ValueError, IndexError):
             continue
         out.append([round(x, 4), round(y, 4), "renk" if len(t) > 2 and t[2] == "renk" else "tek"])
-    return {"tiklar": out}
+    lines = []
+    for t in (z.get("cizgiler") or [])[:MAX_LINES]:
+        try:
+            pts = [[round(min(1.0, max(0.0, float(x))), 4), round(min(1.0, max(0.0, float(y))), 4)]
+                   for x, y in t[1][:MAX_POINTS]]
+        except (TypeError, ValueError, IndexError):
+            continue
+        if pts:
+            lines.append(["kalsin" if t[0] == "kalsin" else "gitsin", pts])
+    return {"tiklar": out, "cizgiler": lines} if lines else {"tiklar": out}
 
 
 # ------------------------------------------------------------------ small tools
@@ -143,9 +160,9 @@ def judge(img, keep, info) -> tuple:
         why.append("Kaldırılacak bir arka plan bulunamadı.")
     if share > 0.93:
         why.append("Neredeyse her şey arka plan sayıldı.")
-    if info["leak"] > 1.25:
+    if info.get("leak", 1.0) > 1.25:
         why.append("Arka plan rengi resmin çizgilerinin arasına da akıyor.")
-    if info["border"] < 0.45:
+    if info.get("border", 1.0) < 0.45:
         why.append("Kenarlarda tek bir arka plan rengi yok.")
     if weak > 0.22:
         why.append("Kesilen yerin bir kısmında belirgin bir kenar yok.")
@@ -155,14 +172,135 @@ def judge(img, keep, info) -> tuple:
         why.append("Dış çizgi çok girintili çıkıntılı çıkıyor.")
     if sz[0] < 0.5:
         why.append("Resim birçok parçaya bölünüyor.")
-    if info["inside"] > 0.3:
+    if info.get("inside", 0.0) > 0.3:
         why.append("Arka planın rengi resmin içinde de var.")
-    if info["pieces"] > 8:
+    if info.get("pieces", 1) > 8:
         why.append("Arka plan birçok ayrı parçadan oluşuyor.")
+    if info.get("stable", 1.0) < 0.9:
+        why.append("Sonuç her denemede değişiyor.")
     if not why:
         return "iyi", []
-    sure = len(why) == 1 and share >= 0.04 and info["leak"] < 1.6 and weak < 0.35
+    sure = len(why) == 1 and share >= 0.04 and info.get("leak", 1.0) < 1.6 and weak < 0.35
     return ("orta" if sure else "zor"), why
+
+
+# ------------------------------------------------------------------ photographs (experimental)
+def _kmeans(x, k, rng, it=12):
+    c = x[rng.choice(len(x), k, replace=False)]
+    for _ in range(it):
+        a = ((x[:, None] - c[None]) ** 2).sum(-1).argmin(1)
+        c = np.array([x[a == i].mean(0) if (a == i).any() else c[i] for i in range(k)])
+    return a
+
+
+class _Colours:
+    """A handful of Gaussian colours: how well a pixel fits the background, or the figure."""
+
+    def __init__(self, x, k, rng):
+        x = x if len(x) < 6000 else x[rng.choice(len(x), 6000, replace=False)]
+        a = _kmeans(x, min(k, len(x)), rng)
+        self.p = []
+        for i in range(k):
+            q = x[a == i]
+            if len(q) > 12:
+                S = np.cov(q.T) + np.eye(x.shape[1]) * 6
+                self.p.append((len(q) / len(x), q.mean(0), np.linalg.inv(S), np.linalg.slogdet(S)[1]))
+
+    def cost(self, x):
+        best = np.full(x.shape[:-1], 1e6, np.float64)
+        for w, m, P, d in self.p:
+            v = x - m
+            best = np.minimum(best, 0.5 * ((v @ P) * v).sum(-1) + 0.5 * d - np.log(w))
+        return best
+
+
+def _mincut(Dbg, Dfg, Wh, Wv):
+    """The figure as the cheapest cut between "background" and "figure" (D*: cost of calling a pixel so)."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import breadth_first_order, maximum_flow
+    h, w = Dbg.shape
+    idx = np.arange(h * w).reshape(h, w)
+    S, T = h * w, h * w + 1
+    lo = np.minimum(Dbg, Dfg)
+    a, b = idx[:, :-1].ravel(), idx[:, 1:].ravel()
+    c, d = idx[:-1].ravel(), idx[1:].ravel()
+    rows = np.concatenate([a, b, c, d, np.full(h * w, S), idx.ravel()])
+    cols = np.concatenate([b, a, d, c, idx.ravel(), np.full(h * w, T)])
+    val = np.concatenate([Wh.ravel(), Wh.ravel(), Wv.ravel(), Wv.ravel(), (Dbg - lo).ravel(), (Dfg - lo).ravel()])
+    val = np.minimum(np.round(val * 60.0), 2 ** 24).astype(np.int32)
+    k = val > 0
+    G = coo_matrix((val[k], (rows[k], cols[k])), shape=(h * w + 2,) * 2).tocsr()
+    res = G - maximum_flow(G, S, T).flow
+    res.data = np.where(res.data > 0, res.data, 0)
+    res.eliminate_zeros()
+    m = np.zeros(h * w + 2, bool)
+    m[breadth_first_order(res, S, return_predecessors=False)] = True
+    return m[:h * w].reshape(h, w)
+
+
+def photo(img, keep_hint=None, drop_hint=None, side=260, gamma=18.0, rounds=4, seed=3):
+    """-> (keep, info). The figure of a photograph: colour models of figure and background, refined by a
+    minimum cut, its edge then laid along the picture's own edges. hints: bool masks (img size) the user drew."""
+    from .renk import _stats, guided, lab32, shrink
+    rng = np.random.default_rng(seed)
+    im = shrink(img, side)
+    h, w = im.shape[:2]
+    X = lab32(im)
+    sm = ndi.gaussian_filter(X, (1.2, 1.2, 0))
+    tex = np.sqrt(np.maximum(ndi.gaussian_filter(X[..., 0] ** 2, 2.5) - ndi.gaussian_filter(X[..., 0], 2.5) ** 2, 0))
+    F = np.dstack([sm, 1.2 * tex])
+    t = max(2, round(0.03 * min(h, w)))
+    R = _ring((h, w), t)
+    R[-t:] = False                                 # a figure often stands on the lower edge
+    yy, xx = np.mgrid[0:h, 0:w]
+    ell = ((xx - w / 2) / (0.36 * w)) ** 2 + ((yy - 0.55 * h) / (0.42 * h)) ** 2 < 1
+    def small(m):
+        if m is None or not m.any():
+            return None
+        return np.asarray(Image.fromarray(m.astype(np.uint8) * 255).resize((w, h), Image.BOX)) > 0
+    ph, pb = small(keep_hint), small(drop_hint)
+    dh = ((X[:, 1:] - X[:, :-1]) ** 2).sum(-1)
+    dv = ((X[1:] - X[:-1]) ** 2).sum(-1)
+    beta = 1 / (2 * np.mean(np.concatenate([dh.ravel(), dv.ravel()])) + 1e-6)
+    Wh, Wv = gamma * np.exp(-beta * dh) + 0.5, gamma * np.exp(-beta * dv) + 0.5
+    fg, same = ell.copy(), []
+    if ph is not None:
+        fg |= ph
+    for it in range(rounds):
+        sel_b = (~fg | R) if it else (R | ~_disk(ell, 0.10 * w, True))
+        if pb is not None:
+            sel_b |= pb
+        if ph is not None:
+            sel_b &= ~ph
+        sel_f = fg if fg.sum() > 200 else ell
+        if pb is not None:
+            sel_f = sel_f & ~pb
+        cb, cf = _Colours(F[sel_b], 5, rng).cost(F), _Colours(F[sel_f], 5, rng).cost(F)
+        lo = np.minimum(cb, cf)
+        cb, cf = np.clip(cb - lo, 0, 12), np.clip(cf - lo, 0, 12)
+        cf = np.where(R if ph is None else R & ~ph, 500.0, cf)       # the frame's edge is background
+        if ph is not None:
+            cb = np.where(ph, 500.0, cb)
+        if pb is not None:
+            cf = np.where(pb, 500.0, cf)
+        new = _mincut(cb, cf, Wh, Wv)
+        same.append(float((new & fg).sum() / max((new | fg).sum(), 1)))
+        fg = new
+        if fg.mean() < 0.01 or fg.mean() > 0.98:
+            break
+    cc, n = ndi.label(fg)
+    if n:
+        sz = np.bincount(cc.ravel())
+        sz[0] = 0
+        keep = cc == sz.argmax()
+        if ph is not None:                         # every part the user marked stays
+            keep |= np.isin(cc, np.unique(cc[ph])) & (cc > 0)
+        fg = ndi.binary_fill_holes(keep)
+    H, W = img.shape[:2]
+    s = np.asarray(Image.fromarray((fg * 255).astype(np.uint8)).resize((W, H), Image.BICUBIC)).astype(np.float32) / 255
+    I = ndi.gaussian_filter(lab32(img)[..., 0], 0.8)
+    q = ndi.gaussian_filter(np.clip(guided(I, _stats(I, 6), s, 6, 30.0), 0, 1), 1.2)
+    return q > 0.5, {"stable": same[-1] if same else 0.0}
 
 
 # ------------------------------------------------------------------ the picture and its areas
@@ -180,24 +318,42 @@ def frame_picture(path: str, kadraj) -> np.ndarray:
 
 @lru_cache(maxsize=2)
 def _found(path: str, mtime: float, kadraj: str) -> tuple:
-    """(picture, colour areas, automatic keep, verdict) of one frame."""
+    """(picture, colour areas or None for a photograph, automatic keep, verdict) of one frame."""
     from . import renk, sade
     img = frame_picture(path, json.loads(kadraj))
     own = renk.find(img)
-    if sade.kind(img, lambda: own)[0] == "ton":
-        lab = sade.label(img, sade.find(img, NOMINAL_MM), NOMINAL_MM)
-        if lab.shape != img.shape[:2]:
-            lab = np.asarray(Image.fromarray(lab.astype(np.uint8)).resize(img.shape[1::-1], Image.NEAREST))
+    if sade.kind(img, lambda: own)[0] == "ton":   # a photograph or painting: no flat areas to go by
+        lab = None
+        keep, info = photo(img)
     else:
-        lab = renk.label(img, own)
-    lab = lab.astype(np.int32)
-    keep, info = flat(img, lab)
+        lab = renk.label(img, own).astype(np.int32)
+        keep, info = flat(img, lab)
     puan, why = judge(img, keep, info)
     if puan == "zor":                            # rather nothing than a wrong cut: the user picks
         keep = np.ones_like(keep)
     for a in (img, lab, keep):
-        a.setflags(write=False)
+        if a is not None:
+            a.setflags(write=False)
     return img, lab, keep, puan, tuple(why)
+
+
+def drawn(lines, kind: str, size) -> Optional[np.ndarray]:
+    """The lines of one kind, as a mask of the given size (W, H)."""
+    from PIL import ImageDraw
+    W, H = size
+    im = Image.new("L", (W, H), 0)
+    d = ImageDraw.Draw(im)
+    r = max(2, round(LINE_W * max(W, H) / 2))
+    for t, pts in lines:
+        if t != kind:
+            continue
+        xy = [(x * (W - 1), y * (H - 1)) for x, y in pts]
+        if len(xy) > 1:
+            d.line(xy, fill=255, width=2 * r, joint="curve")
+        for x, y in xy:
+            d.ellipse((x - r, y - r, x + r, y + r), fill=255)
+    m = np.asarray(im) > 0
+    return m if m.any() else None
 
 
 def click(keep, lab, x, y, whole: bool):
@@ -242,7 +398,14 @@ def drop_threads(keep, lab, line: int):
 def _kept(path: str, mtime: float, kadraj: str, zemin: str) -> tuple:
     from .parca import contour
     img, lab, keep, puan, why = _found(path, mtime, kadraj)
-    tiklar = json.loads(zemin)["tiklar"]
+    z = json.loads(zemin)
+    tiklar, lines = z["tiklar"], z.get("cizgiler") or []
+    if lab is None:                              # a photograph: the lines steer the cut
+        if lines:
+            size = img.shape[1::-1]
+            keep, _ = photo(img, drawn(lines, "kalsin", size), drawn(lines, "gitsin", size))
+            keep.setflags(write=False)
+        return keep, report(keep, puan, why, bool(lines), True)
     if tiklar:
         k = keep.copy()
         for x, y, how in tiklar:
@@ -256,9 +419,23 @@ def _kept(path: str, mtime: float, kadraj: str, zemin: str) -> tuple:
     return keep, report(keep, puan, why, bool(tiklar))
 
 
-def report(keep, puan, why, picked: bool) -> dict:
+def report(keep, puan, why, picked: bool, foto: bool = False) -> dict:
     """What the window says about the background."""
     share = float(1 - keep.mean())
+    if foto:
+        fix = "Yanlış yerleri çizerek düzelt: yeşil çizgi kalsın, kırmızı çizgi gitsin."
+        if picked:
+            soz = ["Arka plan senin çizgilerine göre kaldırıldı.", fix]
+            puan = "orta"
+        elif puan == "iyi":
+            soz = ["Fotoğrafta arka plan bulundu ve kaldırıldı.", fix]
+        elif puan == "orta":
+            soz = ["Arka plan kaldırıldı ama emin değilim: " + why[0].rstrip(".").lower() + ".", fix]
+        else:
+            soz = ["Bu fotoğrafta arka planı kendim bulamadım: " + why[0].rstrip(".").lower() + ".",
+                   "Kalacak yerin üstüne yeşil, gidecek yerin üstüne kırmızı bir çizgi çek."]
+        soz.append("Fotoğrafta arka plan kaldırma deneme aşamasında; kenarlar her zaman kusursuz çıkmaz.")
+        return {"puan": puan, "soz": soz, "pay": round(share, 3), "yol": "foto"}
     if picked:
         soz = ["Arka plan senin seçimine göre kaldırıldı."] if share > 0.005 else ["Arka plandan hiçbir yer seçilmedi."]
         puan = "iyi"
@@ -276,7 +453,7 @@ def report(keep, puan, why, picked: bool) -> dict:
         k = int((sz > 0.01).sum())
         if k > 1:
             soz.append(f"Kalan resim {k} ayrı parça; her biri ayrı yapıştırılır.")
-    return {"puan": puan, "soz": soz, "pay": round(share, 3)}
+    return {"puan": puan, "soz": soz, "pay": round(share, 3), "yol": "duz"}
 
 
 def keep(path: str, kadraj, zemin) -> tuple:

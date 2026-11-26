@@ -7,6 +7,8 @@ const RATIOS = { kare: 1, dikey: 3 / 4, yatay: 4 / 3 };   // width / height
 
 export function makePrep() {
   let prep = null, P = null, R = null, Z = null, tab = 'gorsel', busy = false, ratio = 'tamam', err = '';
+  let brush = null, stroke = null;              // photographs: which line is drawn ('kalsin' | 'gitsin')
+  const foto = () => !!(P && P.zemin && Z && Z.yol === 'foto');
   const send = (d) => prep.set(JSON.stringify(d));
   const root = $('#prep'), view = $('#p-view'), img = $('#p-img'), svg = $('#p-svg');
 
@@ -49,6 +51,13 @@ export function makePrep() {
       el('image', { href: Z.url, x, y, width: w, height: h, preserveAspectRatio: 'none', class: 'p-cut' });
     }
     el('rect', { x, y, width: w, height: h, class: 'p-box', 'data-h': 'm' });
+    const lw = Math.max(3, 0.02 * Math.max(w, h));    // as wide as the program reads it (zemin.LINE_W)
+    const lines = [...((P.zemin && P.zemin.cizgiler) || []), ...(stroke ? [[stroke.t, stroke.pts]] : [])];
+    for (const [t, pts] of lines) {
+      if (!pts.length) continue;
+      const d = pts.map(([u, v], i) => `${i ? 'L' : 'M'}${x + u * w} ${y + v * h}`).join('') + (pts.length === 1 ? 'l0.01 0' : '');
+      el('path', { d, class: 'p-line ' + t, 'stroke-width': lw });
+    }
     if (P.sekil.tur !== 'dikdortgen') el('path', { d: sh, class: 'p-shape' });
     for (const t of [1 / 3, 2 / 3]) {
       el('path', { d: `M${x + w * t} ${y}v${h}M${x} ${y + h * t}h${w}`, class: 'p-third' });
@@ -72,10 +81,27 @@ export function makePrep() {
   svg.addEventListener('pointerdown', (e) => {
     const h = e.target.dataset && e.target.dataset.h;
     if (!h || !P) return;
+    if (h === 'm' && brush && foto()) {          // a line, not a move
+      stroke = { t: brush, pts: [where(e)] };
+      svg.setPointerCapture(e.pointerId);
+      draw();
+      return;
+    }
     dragging = { h, x: e.clientX, y: e.clientY, b: [...box], shift: e.shiftKey, moved: false };
     svg.setPointerCapture(e.pointerId);
   });
+  function where(e) {                           // a pointer as fractions of the cut part
+    const r = svg.getBoundingClientRect(), [x0, y0, x1, y1] = box;
+    const u = (e.clientX - r.left - rect.x - x0 * rect.w) / ((x1 - x0) * rect.w);
+    const v = (e.clientY - r.top - rect.y - y0 * rect.h) / ((y1 - y0) * rect.h);
+    return [Math.min(1, Math.max(0, u)), Math.min(1, Math.max(0, v))];
+  }
   svg.addEventListener('pointermove', (e) => {
+    if (stroke) {
+      const p = where(e), q = stroke.pts[stroke.pts.length - 1];
+      if (Math.hypot(p[0] - q[0], p[1] - q[1]) > 0.004 && stroke.pts.length < 400) { stroke.pts.push(p); draw(); }
+      return;
+    }
     if (!dragging) return;
     const { h, b } = dragging;
     if (!dragging.moved && Math.hypot(e.clientX - dragging.x, e.clientY - dragging.y) < 4) return;
@@ -111,10 +137,18 @@ export function makePrep() {
     draw();
   });
   const drop = () => {
+    if (stroke) {
+      const s = stroke;
+      stroke = null;
+      if (P.zemin) P.zemin.cizgiler = [...(P.zemin.cizgiler || []), [s.t, s.pts]];   // stays drawn until Python answers
+      draw();
+      send({ cizgi: [s.t, s.pts.map(([u, v]) => [+u.toFixed(4), +v.toFixed(4)])] });
+      return;
+    }
     if (!dragging) return;
     const d = dragging;
     dragging = null;
-    if (!d.moved && d.h === 'm' && P.zemin) {    // a click, not a drag: this area goes or comes back
+    if (!d.moved && d.h === 'm' && P.zemin && !foto()) {    // a click, not a drag: this area goes or comes back
       const r = svg.getBoundingClientRect(), [x0, y0, x1, y1] = box;
       const fx = (d.x - r.left - rect.x - x0 * rect.w) / ((x1 - x0) * rect.w);
       const fy = (d.y - r.top - rect.y - y0 * rect.h) / ((y1 - y0) * rect.h);
@@ -169,7 +203,12 @@ export function makePrep() {
     const zs = P.zemin && Z && Z.soz;
     $('#p-bg-fit').className = 'fit on ' + (zs ? Z.puan : 'orta');
     $('#p-bg-t').innerHTML = zs ? Z.soz.map((t) => `<p>${t}</p>`).join('') : '<p>Arka plan aranıyor…</p>';
-    $('#p-bg-geri').style.visibility = P.zemin && P.zemin.tiklar.length ? 'visible' : 'hidden';
+    const done = P.zemin ? P.zemin.tiklar.length + (P.zemin.cizgiler || []).length : 0;
+    $('#p-bg-geri').style.visibility = done ? 'visible' : 'hidden';
+    root.classList.toggle('foto', foto());
+    root.classList.toggle('firca', foto() && !!brush);
+    for (const b of $('#p-brush-s').children) b.classList.toggle('on', b.dataset.v === brush);
+    $('#p-bg-ip').textContent = foto() ? (brush ? 'Görselin üstüne çiz' : 'Önce Kalsın ya da Gitsin’i seç') : 'Shift: o renkteki her yer';
     piece(busy);
     plateOffer({ box: $('#p-base'), text: $('#p-base-t'), check: $('#p-base-c') }, P.tek_taban, R && R.parca, P.hexes, (v) => send({ tek_taban: v }));
     $('#p-fit').className = 'fit' + (R && R.soz && R.soz.length && !busy ? ' on ' + R.puan : '');
@@ -191,6 +230,7 @@ export function makePrep() {
   $('#p-ayna').onclick = () => send({ op: 'ayna' });
   $('#p-bg').onclick = (e) => { const b = e.target.closest('button'); if (b) { Z = null; send({ zemin: b.dataset.v === 'kaldir' }); } };
   $('#p-bg-geri').onclick = () => send({ geri: true });
+  $('#p-brush-s').onclick = (e) => { const b = e.target.closest('button'); if (b) { brush = brush === b.dataset.v ? null : b.dataset.v; render(); } };
   $('#p-shape').onclick = (e) => { const b = e.target.closest('button'); if (b) send({ sekil: { tur: b.dataset.v, r: parseFloat($('#p-r').value) } }); };
   $('#p-r').oninput = () => { if (P) { P.sekil.r = parseFloat($('#p-r').value); draw(); } };
   $('#p-r').onchange = () => send({ sekil: { tur: 'yuvarlak', r: parseFloat($('#p-r').value) } });
@@ -209,7 +249,7 @@ export function makePrep() {
         const s = JSON.parse(j), was = P;
         P = s.open ? s : null;
         if (!P) { R = null; Z = null; err = ''; busy = false; render(); return; }
-        if (!was || was.ad !== P.ad) { R = null; Z = null; tab = 'gorsel'; ratio = P.kutu.every((v, i) => v === [0, 0, 1, 1][i]) ? 'tamam' : 'serbest'; }
+        if (!was || was.ad !== P.ad) { R = null; Z = null; brush = null; tab = 'gorsel'; ratio = P.kutu.every((v, i) => v === [0, 0, 1, 1][i]) ? 'tamam' : 'serbest'; }
         box = [...P.kutu];
         render();
         place();

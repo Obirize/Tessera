@@ -68,7 +68,7 @@ def test_nothing_is_taken_when_unsure(tmp_path):
     p = tmp_path / "gurultu.png"
     Image.fromarray(a).save(p)
     keep, rep = Z.keep(str(p), None, {})
-    assert keep.all() and rep["puan"] == "zor" and "tıkla" in rep["soz"][-1]
+    assert keep.all() and rep["puan"] == "zor" and "çizgi çek" in " ".join(rep["soz"])    # noise reads as a photo
 
 
 def test_silhouette_is_the_kept_area(poster):
@@ -176,3 +176,92 @@ def test_silhouette_goes_through_everything(poster, tmp_path):
     assert not res["kapali_olmayan_govde"] and len(res["plates"]) == e["tabla"] == len(pm["plates"])
     assert os.path.exists(tmp_path / "02_tablalar" / "0_Taban_Siyah.3mf")
     assert any(n.endswith(".png") or n.endswith(".pdf") for n in os.listdir(tmp_path))    # guide, template
+
+
+# ------------------------------------------------------------------ photographs (experimental)
+@pytest.fixture(scope="module")
+def photo(tmp_path_factory):
+    """Photo-like: a shaded, textured figure on a soft, blotchy ground; no flat colour anywhere."""
+    from scipy import ndimage as ndi
+    rng = np.random.default_rng(5)
+    h, w = 600, 500
+    bg = ndi.gaussian_filter(rng.normal(0, 1, (h, w, 3)), (25, 25, 0))
+    img = 60 + 90 * (bg - bg.min()) / (bg.max() - bg.min()) * np.array([0.6, 0.9, 0.7])
+    yy, xx = np.mgrid[:h, :w]
+    fig = ((xx - 250) / 140) ** 2 + ((yy - 330) / 210) ** 2 < 1
+    tex = ndi.gaussian_filter(rng.normal(0, 1, (h, w)), 3) * 25
+    shade = (1 - ((xx - 230) / 200) ** 2 - ((yy - 280) / 260) ** 2).clip(0, 1)
+    f = np.stack([200 + 40 * shade + tex, 120 + 50 * shade + tex, 60 + 20 * shade + tex], -1)
+    img = np.where(fig[..., None], f, img)
+    img = (ndi.gaussian_filter(img, (1.2, 1.2, 0)) + rng.normal(0, 4, img.shape)).clip(0, 255).astype(np.uint8)
+    p = tmp_path_factory.mktemp("foto") / "foto.png"
+    Image.fromarray(img).save(p)
+    return str(p)
+
+
+def at(keep, x, y):
+    h, w = keep.shape
+    return bool(keep[int(y * h), int(x * w)])
+
+
+def test_lines_are_cleaned():
+    z = Z.clean({"cizgiler": [["kalsin", [[0.1, 0.2], [2, -1]]], ["x", [[0.5, 0.5]]], ["kalsin", []], ["gitsin", "?"]]})
+    assert z == {"tiklar": [], "cizgiler": [["kalsin", [[0.1, 0.2], [1.0, 0.0]]], ["gitsin", [[0.5, 0.5]]]]}
+    assert Z.clean({"cizgiler": []}) == {"tiklar": []}        # nothing drawn: the same wish as before
+    m = Z.drawn(z["cizgiler"], "kalsin", (200, 100))
+    assert m.shape == (100, 200) and m[20, 20] and not m[90, 20]
+    assert Z.drawn(z["cizgiler"], "gitsin", (200, 100))[50, 100]
+
+
+def test_photo_background(photo):
+    keep, rep = Z.keep(photo, None, {})
+    assert rep["yol"] == "foto" and rep["puan"] in ("iyi", "orta") and "deneme" in rep["soz"][-1]
+    assert 0.6 < rep["pay"] < 0.75
+    assert at(keep, 0.5, 0.55) and at(keep, 0.5, 0.25) and not at(keep, 0.05, 0.05) and not at(keep, 0.95, 0.5)
+
+
+def test_photo_lines_steer_the_cut(photo):
+    z = {"cizgiler": [["kalsin", [[0.05, 0.1], [0.2, 0.1]]],          # a bit of the ground stays
+                      ["gitsin", [[0.3, 0.9], [0.7, 0.9]]]]}          # the lower part of the figure goes
+    keep, rep = Z.keep(photo, None, z)
+    assert rep["yol"] == "foto" and "çizgilerine" in rep["soz"][0]
+    assert at(keep, 0.12, 0.1) and not at(keep, 0.5, 0.9) and at(keep, 0.5, 0.5)
+    # clicks mean nothing on a photograph
+    assert (Z.keep(photo, None, {"tiklar": [[0.5, 0.5, "tek"]]})[0] == Z.keep(photo, None, {})[0]).all()
+
+
+def test_photo_stays_a_photo(photo):
+    """With its ground filled flat a photo looks drawn; it is still simplified as a photo, and only what
+    stays chooses the colours."""
+    sekil = K.clean_shape({"zemin": {"cizgiler": [["gitsin", [[0.3, 0.9], [0.7, 0.9]]]]}})
+    found, adv = E.analyse(photo, 200, frame=[None, sekil])
+    assert adv["tur"] == "ton" and all(c.get("yol") == "ton" for c in found)
+    assert all(np.array(c["rgb"])[0] > np.array(c["rgb"])[1] for c in found[:2])   # the figure's warm colours lead
+
+
+def test_the_window_takes_lines(photo, tmp_path):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+    from tessera import app2
+    from test_kadraj import Watch
+    qapp = QApplication.instance() or app2.make_app(["test"])
+    b = app2.Bridge(None, QSettings(str(tmp_path / "t.ini"), QSettings.Format.IniFormat))
+    try:
+        b.setWidth(10)
+        p = b.prep
+        w = Watch(qapp, p)
+        assert p.open(photo)
+        w.next(p)
+        n = len(w.res)
+        w.next(p, {"zemin": True})
+        assert next(x["zemin"] for x in w.res[n:] if "zemin" in x)["yol"] == "foto"
+        w.next(p, {"cizgi": ["gitsin", [[0.3, 0.9], [0.7, 0.9]]]})
+        w.next(p, {"cizgi": ["kalsin", [[0.05, 0.1], [0.2, 0.1]]]})
+        assert [t for t, _ in p.recipe.sekil["zemin"]["cizgiler"]] == ["gitsin", "kalsin"]
+        w.next(p, {"geri": True})
+        assert [t for t, _ in p.recipe.sekil["zemin"]["cizgiler"]] == ["gitsin"]
+        w.next(p, {"kutu": [0, 0, 1, 0.8]})                                   # another part: the lines go
+        assert p.recipe.sekil == {"tur": "dikdortgen", "zemin": {"tiklar": []}}
+        p.cancel()
+    finally:
+        b.shutdown()

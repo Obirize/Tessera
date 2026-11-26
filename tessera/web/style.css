@@ -499,3 +499,12 @@ body.prep-open #bar .views, body.prep-open #bar .filemenu { visibility: hidden; 
 #p-bg-t p { margin: 0 0 4px; }
 #prep.zemin .p-box { cursor: crosshair; }
 .p-cut { pointer-events: none; }
+.p-brush { display: none; align-items: center; gap: 10px; margin-top: 10px; font-size: 12.5px; color: var(--ink-2); }
+#prep.foto .p-brush { display: flex; }
+.p-brush i { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 50%; vertical-align: -1px; }
+.p-brush [data-v=kalsin] i { background: #2f9a4a; }
+.p-brush [data-v=gitsin] i { background: #c8322c; }
+#prep.firca .p-box { cursor: cell; }
+.p-line { fill: none; stroke-linecap: round; stroke-linejoin: round; opacity: .6; pointer-events: none; }
+.p-line.kalsin { stroke: #2f9a4a; }
+.p-line.gitsin { stroke: #c8322c; }

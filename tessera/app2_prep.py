@@ -65,7 +65,8 @@ class Prep(QObject):
     @Slot(str)
     def set(self, patch: str) -> None:
         """{"kutu": [...]} | {"sekil": {...}} | {"op": "don"|"ayna"} | {"width_cm"} | {"parca"} | {"tek_taban"}
-        | {"zemin": true|false} | {"tik": [x, y, "tek"|"renk"]} (a click on the frame) | {"geri": true} (undo a click)"""
+        | {"zemin": true|false} | {"tik": [x, y, "tek"|"renk"]} (a click on the frame)
+        | {"cizgi": ["kalsin"|"gitsin", [[x, y], ...]]} (a line drawn on a photograph) | {"geri": true} (undo the last)"""
         r = self.recipe
         if r is None:
             return
@@ -75,10 +76,14 @@ class Prep(QObject):
         sekil = dict(d["sekil"] if "sekil" in d else r.sekil or {"tur": "dikdortgen"})
         if "zemin" in d:
             z = {"tiklar": []} if d["zemin"] else None
-        if z is not None and d.get("tik"):
-            z = {"tiklar": z["tiklar"] + [d["tik"]]}
-        if z is not None and d.get("geri"):
-            z = {"tiklar": z["tiklar"][:-1]}
+        if z is not None:
+            z = {"tiklar": list(z["tiklar"]), "cizgiler": list(z.get("cizgiler") or [])}
+            if d.get("tik"):
+                z["tiklar"].append(d["tik"])
+            if d.get("cizgi"):
+                z["cizgiler"].append(d["cizgi"])
+            if d.get("geri"):
+                (z["cizgiler"] or z["tiklar"] or [None]).pop()
         was = dict(k)
         if d.get("kutu"):
             k["kutu"] = d["kutu"]
@@ -94,7 +99,7 @@ class Prep(QObject):
         turned = (k["don"], k["ayna"]) != (was["don"], was["ayna"])
         moved = turned or max(abs(float(u) - v) for u, v in zip(k["kutu"], was["kutu"])) > 1e-4
         if z is not None and moved:
-            z = {"tiklar": []}                    # the clicks were on another part of the picture
+            z = {"tiklar": []}                    # the clicks and lines were on another part of the picture
         sekil.pop("zemin", None)
         if z is not None:
             sekil["zemin"] = z

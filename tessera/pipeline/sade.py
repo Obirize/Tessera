@@ -15,6 +15,7 @@ label(img, colours, width_mm)  -> index map of the simplified picture
 from __future__ import annotations
 
 import numpy as np
+from PIL import Image
 from scipy import ndimage as ndi
 
 from .renk import TONES, WORK as FLAT_WORK, _stats, blur, cells, guided, lab32, paint_lab, shrink, spread_in
@@ -177,10 +178,16 @@ def choose(lab: np.ndarray, w: np.ndarray, n=None) -> list:
     return sel
 
 
-def find(img: np.ndarray, width_mm: float, n=None) -> list:
-    """Like renk.find, but for tones: [{"rgb", "pay", "oz", "yol": "ton", "ad", "hex"}]."""
+def find(img: np.ndarray, width_mm: float, n=None, mask=None) -> list:
+    """Like renk.find, but for tones: [{"rgb", "pay", "oz", "yol": "ton", "ad", "hex"}].
+    mask: where the stones are (bool, any size); what lies outside has no say in the colours."""
     lab, mm = prepare(img, width_mm)
-    sel = choose(lab, importance(lab, mm), n)
+    w = importance(lab, mm)
+    if mask is not None:
+        m = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize(lab.shape[1::-1], Image.BILINEAR)) > 127
+        if m.any():
+            w = np.where(m, w, 1e-6)
+    sel = choose(lab, w, n)
     P = paint_lab(TONES)
     cols = [{"oz": [[float(v) for v in P[i]]], "yol": "ton", "ad": TONES[i][0], "hex": TONES[i][1]} for i in sel]
     L = label_lab(lab, cols, mm)

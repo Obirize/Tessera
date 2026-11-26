@@ -97,6 +97,13 @@ def _look(path: str, mtime: float, width_mm: float, descreen_mode, frame: str = 
         img = screen_free(img, descreen_mode, width_mm)
     own = cache(lambda: renk.find(img))
     k, soft = sade.kind(img, own)
+    kadraj, sekil = json.loads(frame) or (None, None)
+    if (sekil or {}).get("zemin") is not None:   # what kind of picture it is, the background still in it:
+        plain = {a: b for a, b in sekil.items() if a != "zemin"}   # a photo with its ground filled flat looks drawn
+        base, _ = open_capped(picture(path, kadraj, plain if plain != {"tur": "dikdortgen"} else None))
+        if descreen_mode is not False:
+            base = screen_free(base, descreen_mode, width_mm)
+        k, soft = sade.kind(base, lambda: renk.find(base))
     return img, native, k, round(soft, 1), own
 
 
@@ -110,7 +117,11 @@ def analyse(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[
                                       json.dumps(frame))
     kind = "ton" if tur == "ton" else "net" if tur == "net" and k == "ton" else k
     if kind == "ton":
-        found = sade.find(img, width_mm, n)
+        m = None
+        if frame and frame[1]:
+            from .pipeline.kadraj import inside
+            m = inside(image_path, frame[0], frame[1], img.shape[1::-1])
+        found = sade.find(img, width_mm, n, m)
     else:
         found = renk.paint(copy.deepcopy(own()) if n is None else renk.find(img, n))
     if frame and frame[1]:                           # the shares of what becomes stones, not of the filled outside
