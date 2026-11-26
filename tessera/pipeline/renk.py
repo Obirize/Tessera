@@ -10,6 +10,7 @@ label(img, colours)  -> index map, same height and width as img
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import numpy as np
@@ -75,6 +76,19 @@ def paint(found: list) -> list:
     return found
 
 
+def side_by_side(fn, items, k: int = 4):
+    """fn over items on k threads (numpy, scipy and PIL let go of the GIL), the results in order; at most k
+    of them wait at a time."""
+    items = list(items)
+    with ThreadPoolExecutor(k) as ex:
+        fut = [ex.submit(fn, x) for x in items[:k]]
+        for i in range(len(items)):
+            if i + k < len(items):
+                fut.append(ex.submit(fn, items[i + k]))
+            r, fut[i] = fut[i].result(), None
+            yield r
+
+
 def lab32(img: np.ndarray) -> np.ndarray:
     """A picture (uint8, or float 0..255) in Lab, float32."""
     if img.dtype != np.uint8:
@@ -124,18 +138,25 @@ def sharpen_edges(img: np.ndarray, r: int) -> np.ndarray:
     if not len(ys):
         return img
     H, W = L.shape
-    v = L[ys, xs]
-    want = np.where(hi[ys, xs] - v < v - lo[ys, xs], hi[ys, xs], lo[ys, xs])
-    best = np.full(len(ys), 1e9, np.float32)
-    by, bx = ys.copy(), xs.copy()
-    for dy in range(-r, r + 1):
-        for dx in range(-r, r + 1):
-            y, x = np.clip(ys + dy, 0, H - 1), np.clip(xs + dx, 0, W - 1)
-            c = np.abs(L[y, x] - want) + 0.4 * (dy * dy + dx * dx) ** 0.5
-            m = c < best
-            best[m], by[m], bx[m] = c[m], y[m], x[m]
+
+    def source(part):                            # every edge pixel on its own: the pixels go in four parts
+        ys, xs = part
+        v = L[ys, xs]
+        want = np.where(hi[ys, xs] - v < v - lo[ys, xs], hi[ys, xs], lo[ys, xs])
+        best = np.full(len(ys), 1e9, np.float32)
+        by, bx = ys.copy(), xs.copy()
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                y, x = np.clip(ys + dy, 0, H - 1), np.clip(xs + dx, 0, W - 1)
+                c = np.abs(L[y, x] - want) + 0.4 * (dy * dy + dx * dx) ** 0.5
+                m = c < best
+                best[m], by[m], bx[m] = c[m], y[m], x[m]
+        return by, bx
+    cut = np.linspace(0, len(ys), 5).astype(int)
+    with ThreadPoolExecutor(4) as ex:
+        got = list(ex.map(source, [(ys[a:b], xs[a:b]) for a, b in zip(cut[:-1], cut[1:])]))
     out = img.copy()
-    out[ys, xs] = img[by, bx]
+    out[ys, xs] = img[np.concatenate([g[0] for g in got]), np.concatenate([g[1] for g in got])]
     return out
 
 
@@ -150,12 +171,14 @@ def features(img: np.ndarray, scale: float = 1.0) -> np.ndarray:
     k = _hue_gain(L)
     r = max(2, int(round(2.6 * sig)))
     st = _stats(L, r)
-    a, b = (k * guided(L, st, lab[..., i], r) for i in (1, 2))
     f = max(1, int(round(scale)))                 # the wide windows run on a coarse copy
     Lc = L[::f, ::f]
     w = max(5, int(0.028 * WORK * scale / f)) | 1
-    op = ndi.gaussian_filter(ndi.grey_opening(Lc, w), w / 4)
-    cl = ndi.gaussian_filter(ndi.grey_closing(Lc, w), w / 4)
+    with ThreadPoolExecutor(4) as ex:             # four maps that do not need each other, side by side
+        a, b = (ex.submit(lambda i: k * guided(L, st, lab[..., i], r), i) for i in (1, 2))
+        op = ex.submit(lambda: ndi.gaussian_filter(ndi.grey_opening(Lc, w), w / 4))
+        cl = ex.submit(lambda: ndi.gaussian_filter(ndi.grey_closing(Lc, w), w / 4))
+        a, b, op, cl = a.result(), b.result(), op.result(), cl.result()
     if f > 1:
         hw = (L.shape[1], L.shape[0])
         op, cl = (np.asarray(Image.fromarray(x).resize(hw, Image.BILINEAR)) for x in (op, cl))
@@ -334,14 +357,15 @@ def label_features(F: np.ndarray, parts: list, scale: float) -> np.ndarray:
     I = F[..., 0] / W_L
     r = max(1, int(round(1.6 * scale)))
     st = _stats(I, r)
-    cost = []
-    for cs in parts:
+
+    def cost_of(cs):
         d = None
         for c in cs:
             e = ((F - np.asarray(c, np.float32)) ** 2).sum(-1)
             d = e if d is None else np.minimum(d, e)
-        cost.append(guided(I, st, np.minimum(np.sqrt(d), 45.0), r))
-    cost = np.stack(cost)
+        return guided(I, st, np.minimum(np.sqrt(d), 45.0), r)
+    with ThreadPoolExecutor(4) as ex:            # numpy and scipy let go of the GIL: the colours side by side
+        cost = np.stack(list(ex.map(cost_of, parts)))
     out = cost.argmin(0).astype(np.int16)
     # lines that fade for a moment are followed through (a rope in the shade stays one rope)
     best = cost.min(0)
@@ -377,12 +401,16 @@ def enlarge(lab: np.ndarray, n: int, size_wh) -> np.ndarray:
         return lab
     best = np.full((h, w), -1.0, np.float32)
     out = np.zeros((h, w), np.int16)
-    for c in range(n):
+
+    def big(c):
         m = lab == c
         if not m.any():
-            continue
+            return None
         f = ndi.gaussian_filter(m.astype(np.float32), 0.55, truncate=3.0)
-        f = np.asarray(Image.fromarray(f).resize((w, h), Image.BICUBIC))
+        return np.asarray(Image.fromarray(f).resize((w, h), Image.BICUBIC))
+    for c, f in enumerate(side_by_side(big, range(n))):     # made side by side, laid on top of each other in order
+        if f is None:
+            continue
         k = f > best
         out[k], best[k] = c, f[k]
     return out

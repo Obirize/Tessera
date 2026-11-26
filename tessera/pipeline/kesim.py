@@ -17,7 +17,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 import numpy as np
 import shapely
@@ -33,6 +35,29 @@ LAYOUTS = {"mozaik": "Mozaik", "kirik": "Kırık taş", "blok": "Blok", "iri": "
 MIN_W = 1.2          # printable feature width, mm (3 lines of a 0.4 nozzle)
 MIN_A = 5.0          # smallest loose stone, mm2
 FEATURE_A, FEATURE_W, FEATURE_L = 150.0, 14.0, 26.0   # up to this a shape stays one stone (mm2, mm, mm)
+
+
+THREADS = max(2, min(8, os.cpu_count() or 2))   # numpy, scipy and shapely let go of the GIL while they work
+
+
+@contextmanager
+def pool(n: int = THREADS):
+    """A few worker threads; when the caller gives up (a newer draft) the jobs not begun are dropped."""
+    ex = ThreadPoolExecutor(n)
+    try:
+        yield ex
+    except BaseException:
+        ex.shutdown(wait=True, cancel_futures=True)
+        raise
+    ex.shutdown(wait=True)
+
+
+def big_first(ex, fn, items, size):
+    """fn over items on the pool ex, the biggest begun first; the results come in the items' order."""
+    fut = [None] * len(items)
+    for i in sorted(range(len(items)), key=lambda i: -size(items[i])):
+        fut[i] = ex.submit(fn, items[i])
+    return (f.result() for f in fut)
 
 
 def resolution(width_mm: float) -> float:
@@ -60,6 +85,50 @@ def image_colours(img: np.ndarray, pal: np.ndarray):
 def drop_specks(lab: np.ndarray, n: int, min_px: float, out: int = -1) -> np.ndarray:
     """Areas under min_px take the colour that surrounds them most. out: label of what lies outside the
     artwork; nothing is given to it, only a speck with no other neighbour leaves."""
+    H, W = lab.shape
+    if not lab.flags.c_contiguous:
+        return _drop_specks_one_by_one(lab, n, min_px, out)
+    flat = lab.reshape(-1)
+    for c in range(n):
+        cc, k = ndi.label(lab == c)
+        if not k:
+            continue
+        small = np.bincount(cc.ravel()) < min_px
+        small[0] = False
+        if not small.any():
+            continue
+        # all specks of this colour at once: they never touch each other, so the order does not matter
+        ccf = cc.reshape(-1)
+        P = np.flatnonzero(small[ccf])
+        ids = ccf[P].astype(np.int64)
+        py, px = np.divmod(P, W)
+        pairs = []
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):          # the ring: 4-neighbours outside the speck
+            yy, xx = py + dy, px + dx
+            ok = (yy >= 0) & (yy < H) & (xx >= 0) & (xx < W)
+            q = yy[ok] * W + xx[ok]
+            i = ids[ok]
+            ok = (ccf[q] != i) & (flat[q] != out)
+            pairs.append(i[ok] * flat.size + q[ok])
+        pq = np.unique(np.concatenate(pairs))                       # a ring pixel counts once per speck
+        gi, gv = pq // flat.size, flat[pq % flat.size].astype(np.int64)
+        M = int(gv.max()) + 1 if len(gv) else 1
+        key, cnt = np.unique(gi * M + gv, return_counts=True)
+        gi, gv = key // M, key % M
+        o = np.lexsort((gv, -cnt, gi))                              # most votes, the lowest colour on a tie
+        first = o[np.r_[True, gi[o][1:] != gi[o][:-1]]] if len(o) else o
+        to = np.full(k + 1, -1, np.int64)
+        to[gi[first]] = gv[first]
+        new = to[ids]
+        has = new >= 0
+        flat[P[has]] = new[has]
+        if out >= 0:
+            flat[P[~has]] = out
+    return lab
+
+
+def _drop_specks_one_by_one(lab, n, min_px, out):
+    """The same, speck by speck (for a map that is a view into a bigger one)."""
     H, W = lab.shape
     for c in range(n):
         cc, k = ndi.label(lab == c)
@@ -127,18 +196,22 @@ def widen_thin(lab: np.ndarray, order, res: float) -> np.ndarray:
     """Lines thinner than MIN_W are widened to about MIN_W (taken from the neighbours)."""
     w = max(3, int(round(MIN_W / res)) | 1)
     out = lab.copy()
-    for c in order:
+
+    def grow_of(c):                              # read from lab only: the colours can be looked at side by side
         M = (lab == c).view(np.uint8)
         core = ndi.maximum_filter(ndi.minimum_filter(M, size=w), size=w + 2)
         thin = (M > 0) & (core == 0)
         cc, k = ndi.label(thin, np.ones((3, 3)))
         if not k:
-            continue
+            return None
         keep = np.zeros(k + 1, bool)
         for i, sl in enumerate(ndi.find_objects(cc), 1):
             keep[i] = math.hypot(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start) * res > 2.5
-        grow = ndi.maximum_filter(keep[cc].view(np.uint8), size=3) > 0
-        out[grow & (out != c)] = c
+        return ndi.maximum_filter(keep[cc].view(np.uint8), size=3) > 0
+    with pool(4) as ex:                          # four: every one holds a few full-size maps
+        for c, grow in zip(order, ex.map(grow_of, order)):
+            if grow is not None:
+                out[grow & (out != c)] = c
     return out
 
 
@@ -335,7 +408,9 @@ def _merge_small(L, colour, min_px, passes=3):
                 mp[s] = t
         for _ in range(4):
             mp = mp[mp]
-        L = np.unique(mp[L], return_inverse=True)[1].reshape(L.shape).astype(np.int32)
+        used = np.zeros(n, bool)                 # numbered again 0, 1, 2 ... (as np.unique would, without a sort)
+        used[mp[sz > 0]] = True
+        L = (np.cumsum(used) - 1)[mp][L].astype(np.int32)
     return L
 
 
@@ -346,47 +421,145 @@ _SEG = {1: [(3, 0)], 2: [(0, 1)], 3: [(3, 1)], 4: [(1, 2)], 5: [(3, 0), (1, 2)],
 
 def outline(m, oy, ox, res, sig=1.2):
     """Smooth polygon (mm, y down) of a mask: marching squares on a lightly blurred mask."""
-    f = ndi.gaussian_filter(np.pad(m.astype(np.float32), 5), sig, truncate=3.0) - 0.5
-    ins = (f > 0).view(np.uint8)
-    case = ins[:-1, :-1] + 2 * ins[:-1, 1:] + 4 * ins[1:, 1:] + 8 * ins[1:, :-1]
-    W = f.shape[1]
-    nx = {}
-    for cv, segs in _SEG.items():
-        ys, xs = np.nonzero(case == cv)
-        if not len(ys):
-            continue
-        base = ys * W + xs                       # edge id: 2*pixel (horizontal) or 2*pixel+1 (vertical)
-        e = {0: 2 * base, 1: 2 * (base + 1) + 1, 2: 2 * (base + W), 3: 2 * base + 1}
-        for a, b in segs:
-            nx.update(zip(e[a].tolist(), e[b].tolist()))
-    ff = f.ravel()
+    return _whole([Polygon(q).buffer(0) for q in _loops(m, oy, ox, res, sig)])
 
-    def pt(e):
-        p = e >> 1
-        y, x = divmod(p, W)
-        if e & 1:
-            a, b = ff[p], ff[p + W]
-            return x, y + a / (a - b)
-        a, b = ff[p], ff[p + 1]
-        return x + a / (a - b), y
 
+def outlines(items, res, sig=1.2, tick=None) -> list:
+    """outline() of many masks [(m, oy, ox), ...], the same polygons; the GEOS work goes in big batches to a
+    few threads (one call per batch lets go of the GIL once, small calls one by one would fight over it).
+    tick(share done) now and then."""
     loops = []
-    while nx:
-        e = next(iter(nx))
-        lp = []
-        while e in nx:
-            lp.append(pt(e))
-            e = nx.pop(e)
-        if len(lp) > 6:
-            loops.append(np.asarray(lp) * res + ((ox - 4.5) * res, (oy - 4.5) * res))
-    if not loops:
+    for k, (m, oy, ox) in enumerate(items):
+        loops.append(_loops(m, oy, ox, res, sig))
+        if tick and k % 200 == 199:
+            tick(k / len(items))
+    ps = batch(lambda a: shapely.buffer(a, 0), [Polygon(q) for lp in loops for q in lp])
+    out, k = [], 0
+    for lp in loops:
+        out.append(_whole(list(ps[k:k + len(lp)])))
+        k += len(lp)
+    return out
+
+
+def batch(fn, geoms) -> np.ndarray:
+    """fn (a vectorised shapely call) over a list of geometries, in a few large parts side by side."""
+    a = np.empty(len(geoms), object)
+    a[:] = geoms
+    if len(a) < 64:
+        return fn(a) if len(a) else a
+    with pool() as ex:
+        return np.concatenate(list(ex.map(fn, np.array_split(a, THREADS))))
+
+
+def shrunk(Ps, gap, edge) -> np.ndarray:
+    """The outlines Ps shrunk by half the joint (a stone too small for that by a fifth of it) and kept inside the
+    artwork's edge (prepared polygon or None); as one by one, the GEOS work in batches."""
+    S = batch(lambda a: shapely.simplify(shapely.buffer(a, -gap / 2, quad_segs=3), 0.05), Ps)
+    for k in np.flatnonzero(shapely.is_empty(S)):
+        S[k] = Ps[k].buffer(-gap / 5, quad_segs=3)
+    if edge is not None and len(S):
+        k = np.flatnonzero(~shapely.covers(edge, S))
+        if len(k):
+            S[k] = shapely.intersection(S[k], edge)      # the exact curve instead of the pixel one
+    return S
+
+
+def _whole(ps):
+    """The polygon of a mask from its rings (buffered): the largest, holes cut, islands joined."""
+    if not ps:
         return None
-    ps = sorted((Polygon(q).buffer(0) for q in loops), key=lambda p: -p.area)
+    ps = sorted(ps, key=lambda p: -p.area)
     P = ps[0]
     for h in ps[1:]:
         if h.area > 0.6:
             P = P.difference(h) if P.contains(h.representative_point()) else P.union(h)
     return P
+
+
+def _loops(m, oy, ox, res, sig):
+    """The closed lines around a mask (mm, y down) as point arrays, in the order the walk finds them."""
+    f = ndi.gaussian_filter(np.pad(m.astype(np.float32), 5), sig, truncate=3.0) - 0.5
+    ins = (f > 0).view(np.uint8)
+    case = ins[:-1, :-1] + 2 * ins[:-1, 1:] + 4 * ins[1:, 1:] + 8 * ins[1:, :-1]
+    W = f.shape[1]
+    cells = np.flatnonzero((case > 0) & (case < 15))
+    cv_all = case.ravel()[cells]
+    o = np.argsort(cv_all, kind="stable")        # by case, row by row inside one case: the order the walk relies on
+    cells, cv_all = cells[o], cv_all[o]
+    cut = np.searchsorted(cv_all, np.arange(1, 16))
+    ka, kb = [], []
+    for cv, segs in _SEG.items():
+        c = cells[cut[cv - 1]:cut[cv]]
+        if not len(c):
+            continue
+        ys, xs = np.divmod(c, W - 1)
+        base = ys * W + xs                       # edge id: 2*pixel (horizontal) or 2*pixel+1 (vertical)
+        e = {0: 2 * base, 1: 2 * (base + 1) + 1, 2: 2 * (base + W), 3: 2 * base + 1}
+        for a, b in segs:
+            ka.append(e[a])
+            kb.append(e[b])
+    ff = f.ravel()
+    off = ((ox - 4.5) * res, (oy - 4.5) * res)
+    K = np.concatenate(ka) if ka else np.zeros(0, np.int64)
+    V = np.concatenate(kb) if kb else K
+    if np.unique(K).size == K.size:
+        loops = _chains(K, V, ff, W, res, off)
+    else:                                        # an edge met twice (never seen): the plain walk
+        nx = {}
+        for a, b in zip(ka, kb):
+            nx.update(zip(a.tolist(), b.tolist()))
+
+        def pt(e):
+            p = e >> 1
+            y, x = divmod(p, W)
+            if e & 1:
+                a, b = ff[p], ff[p + W]
+                return x, y + a / (a - b)
+            a, b = ff[p], ff[p + 1]
+            return x + a / (a - b), y
+
+        loops = []
+        while nx:
+            e = next(iter(nx))
+            lp = []
+            while e in nx:
+                lp.append(pt(e))
+                e = nx.pop(e)
+            if len(lp) > 6:
+                loops.append(np.asarray(lp) * res + off)
+    return loops
+
+
+def _chains(K, V, ff, W, res, off):
+    """The closed lines of marching squares: K[i] -> V[i] are the segments (edge ids, each K once), walked
+    from the first unwalked edge in K's order, exactly as a dict walk would. Points as the scalar code gives
+    them (float32 crossing, whole pixel on the other axis)."""
+    o = np.argsort(K)
+    j = np.minimum(np.searchsorted(K[o], V), len(K) - 1)
+    nxt = np.where(K[o][j] == V, o[j], -1).tolist()
+    p = K >> 1
+    y, x = np.divmod(p, W)
+    vert = (K & 1).astype(bool)
+    a = ff[p]
+    b = np.where(vert, ff[np.minimum(p + W, len(ff) - 1)], ff[np.minimum(p + 1, len(ff) - 1)])
+    t = a / (a - b)                              # float32, as in the scalar code
+    px = np.where(vert, x, x.astype(np.float32) + t).astype(np.float64)
+    py = np.where(vert, y.astype(np.float32) + t, y).astype(np.float64)
+    xy = np.stack([px, py], 1)
+    seen = bytearray(len(K))
+    loops = []
+    for s in range(len(K)):
+        if seen[s]:
+            continue
+        lp = []
+        e = s
+        while e >= 0 and not seen[e]:
+            seen[e] = 1
+            lp.append(e)
+            e = nxt[e]
+        if len(lp) > 6:
+            loops.append(xy[lp] * res + off)
+    return loops
 
 
 def _parts(g):
@@ -537,8 +710,8 @@ def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik",
     L = np.full((H, W), -1, np.int32)
     nxt = done = 0
     total = sum(j[2].size for j in jobs) or 1
-    with ThreadPoolExecutor(6) as ex:
-        for (c, sl, m, _), (o, q) in zip(jobs, ex.map(work, jobs)):
+    with pool() as ex:                           # the biggest areas first: they take longest
+        for (c, sl, m, _), (o, q) in zip(jobs, big_first(ex, work, jobs, lambda j: j[2].size)):
             L[sl][m] = o[m] + nxt
             nxt += q
             done += m.size
@@ -565,21 +738,19 @@ def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik",
 
     polys, pcol, pstone, pzone = [], [], [], []
     objs = ndi.find_objects(L + 1)
+    todo = []
     for i, sl in enumerate(objs):
         if sl is None or out[i]:
             continue
         m = L[sl] == i
-        oy, ox = sl[0].start, sl[1].start
         if base is not None and np.bincount(full[sl][m], minlength=n)[:n].argmax() == base:
             continue
-        P = outline(m, oy, ox, res)
-        if P is None:
-            continue
-        S = shapely.simplify(P.buffer(-gap / 2, quad_segs=3), 0.05)
-        if S.is_empty:
-            S = P.buffer(-gap / 5, quad_segs=3)
-        if edge is not None and not edge.covers(S):
-            S = S.intersection(edge)             # the exact curve instead of the pixel one
+        todo.append((i, sl, m))
+    Ps = outlines([(m, sl[0].start, sl[1].start) for _, sl, m in todo], res,
+                  tick=lambda f: report(0.72 + 0.2 * f, "Taşların kenarı çiziliyor"))
+    todo = [t + (P,) for t, P in zip(todo, Ps) if P is not None]
+    for (i, sl, m, P), S in zip(todo, shrunk([t[3] for t in todo], gap, edge)):
+        oy, ox = sl[0].start, sl[1].start
         zz = int(np.bincount(z[sl][m].clip(0)).argmax())
         cols = np.bincount(full[sl][m], minlength=n)[:n]
         if ams and (cols * res ** 2 > 2.0).sum() > 1:
@@ -602,8 +773,6 @@ def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik",
         for g in _parts(S):
             if g.area >= 1.5:
                 polys.append(g), pcol.append(col), pstone.append(i), pzone.append(zz)
-        if i % 200 == 0:
-            report(0.72 + 0.26 * i / len(objs), "Taşların kenarı çiziliyor")
     report(1.0, "Taşlar hazır")
     return {"polys": polys, "colour": np.array(pcol), "stone": np.array(pstone), "zone": np.array(pzone),
             "label": L, "lab": full, "res": res, "size": (W * res, H * res)} | more

@@ -177,3 +177,22 @@ def test_remembered_colour_areas_change_nothing():
     assert [p.wkb for p in again["polys"]] == [p.wkb for p in fresh["polys"]]
     other = kesim.build(im[:, ::-1].copy(), 150, pal, layout="blok")             # another picture is not mixed up
     assert [p.wkb for p in other["polys"]] != [p.wkb for p in fresh["polys"]]
+
+
+def test_fast_paths_give_the_same_stones(mosaics, monkeypatch):
+    """All specks at once = speck by speck; the picture shaded in bands = in one piece."""
+    from scipy import ndimage as ndi
+    from tessera.pipeline import kesim
+    from tessera.render import stones
+    rng = np.random.default_rng(5)
+    for out in (-1, 4):
+        lab = ndi.gaussian_filter(rng.normal(size=(160, 210, 4)), (1.5, 1.5, 0)).argmax(2).astype(np.int16)
+        if out >= 0:
+            lab[:30] = out
+        a = kesim.drop_specks(lab.copy(), 4, 25, out)
+        b = kesim._drop_specks_one_by_one(lab.copy(), 4, 25, out)
+        assert np.array_equal(a, b)
+    m = mosaics["mozaik"]
+    banded = render_cut(m, 600)
+    monkeypatch.setattr(stones, "BANDS", 1)
+    assert np.array_equal(banded, render_cut(m, 600))
