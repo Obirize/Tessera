@@ -26,6 +26,7 @@ from shapely.geometry import Polygon
 from ..model import Mode, Mosaic
 from .layout import (GeoParams, _clean, _pairs, _part_metrics, _polys, _tile_polygons, _UF,
                      backing_colour_index, colour_letters, panel_xy)
+from .plate import cell, frame_of
 
 BEVEL_MM = 0.7               # printable top chamfer (0.6-0.8)
 MIN_TOP_MM = 1.2             # lowest stone top
@@ -307,12 +308,24 @@ def _build_cut(m: Mosaic, gp, mode, progress=None) -> StoneLayout:
         if progress and t % 400 == 0:
             progress(0.8 * t / len(m.polys), "Taş kodları veriliyor")
     letters = colour_letters([f.name for f in s.palette])
+    plate = m.plate is not None and mode == Mode.PIECES
     used = sorted({x["panel"] for x in raw})
+    cells = {}
+    if plate:
+        frame = frame_of(m)
+        cells = {row * nx + col: cell(frame, wmm, hmm, nx, ny, col, row) for row in range(ny) for col in range(nx)}
+        used = sorted(set(used) | {i for i, c in cells.items() if c.area > 1.0})
     panels, stones = [], []
     for k, pid in enumerate(used):
         rr = sorted((x for x in raw if x["panel"] == pid), key=lambda x: (-int(x["rp"].y // 10.0), x["rp"].x))
-        region = shapely.union_all([x["poly"].buffer(s.gap_mm * 0.75, quad_segs=1) for x in rr]).buffer(-s.gap_mm * 0.5)
-        region = Polygon(max(_polys(region), key=lambda q: q.area).exterior)
+        if plate:
+            region = cells[pid]
+        else:
+            region = shapely.union_all([x["poly"].buffer(s.gap_mm * 0.75, quad_segs=1) for x in rr]).buffer(-s.gap_mm * 0.5)
+            if m.outline is None:
+                region = Polygon(max(_polys(region), key=lambda q: q.area).exterior)
+            else:                                 # an outline may leave a panel in several parts
+                region = shapely.union_all([Polygon(q.exterior) for q in _polys(region)])
         pn = StonePanel(k, pid // nx, pid % nx, region, tuple(region.bounds))
         digits = max(3, len(str(len(rr))))
         for j, x in enumerate(rr):

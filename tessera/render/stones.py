@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 from scipy import ndimage as ndi
 
+from ..geometry.plate import wall_height
 from ..model import Mosaic
 
 WALL = (214, 208, 198)
@@ -30,6 +31,9 @@ def render_cut(m: Mosaic, width_px: int = 1500, az: float = -130.0, el: float = 
     top = np.concatenate([[0.0], m.tile_plane[:, 0]]).astype(np.float32)
     e = ndi.distance_transform_edt(I > 0).astype(np.float32) / px
     Hm = np.where(I > 0, top[I] - np.clip(0.5 - e, 0, .5) ** 2 * 2.4, 0).astype(np.float32)
+    if m.plate is not None:                  # the plate's walls stand between the stones where there is room
+        core = ndi.distance_transform_edt(I == 0) / px >= 0.55
+        Hm[(I == 0) & (ndi.distance_transform_edt(~core) / px <= 0.55)] = wall_height(m)
     Hs = ndi.gaussian_filter(Hm, .7)
     gy, gx = np.gradient(Hs, 1 / px)
     a, q = math.radians(az), math.radians(el)
@@ -43,9 +47,15 @@ def render_cut(m: Mosaic, width_px: int = 1500, az: float = -130.0, el: float = 
         sh = np.maximum(sh, Hs[ys[:, None], xs[None]] - Hs - k / px * math.tan(q))
     sh = ndi.gaussian_filter(np.clip(sh * 1.6, 0, 1), 1.0)
     ao = np.clip(1 - (ndi.uniform_filter(Hm, max(3, int(2.2 * px) | 1)) - Hm) * .22, .12, 1)
+    if m.plate is not None:
+        wall = m.settings.palette[m.plate_colour].rgb
     pal = np.array([wall] + [f.rgb for f in m.settings.palette], np.float32)
     val = np.concatenate([[0.0], np.random.default_rng(3).uniform(-.025, .025, len(m.polys))]).astype(np.float32)
     ci = np.concatenate([[0], np.asarray(m.tile_colour) + 1])[I]
     col = pal[ci] * (1 + val[I])[..., None] * (ao * (.38 + .82 * dif * (1 - .75 * sh)))[..., None]
+    if m.outline is not None:                # outside the artwork: the bare wall
+        o = Image.new("L", (W, H), 0)
+        ImageDraw.Draw(o).polygon([(x * px, y * px) for x, y in m.outline.exterior.coords], fill=255)
+        col[np.asarray(o) == 0] = WALL
     out = Image.fromarray(np.clip(col, 0, 255).astype(np.uint8))
     return np.asarray(out.resize((W // ss, H // ss), Image.BOX))

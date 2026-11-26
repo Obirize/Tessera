@@ -7,6 +7,9 @@ Bir görseli, taşlarını tek tek 3D yazıcıdan basabileceğin bir mozaiğe ç
 - **Resmi taşın kesimi çizer.** Göz, dudak, pencere kendi biçiminde tek taş olarak kesilir; büyük alanlar konturu izleyen taş sıralarına bölünür.
 - **Her taş tek renk ve ayrı bir model.** Renk sınırı her zaman kesim yeridir. Taşın içinde renk yalnızca AMS modunda değişir.
 - **Derz ve arka levha gerekmez.** Taşlar 1:1 kâğıt şablona göre duvara ya da levhaya yapıştırılır.
+- **Parça sayısını sen seçersin.** 10 cm'lik 20 parçalık bir iş de olur, binlerce taşlık bir duvar da.
+- **İstersen tek parça taban.** Çizgi rengi, taşların oturduğu yuvalı tabana dönüşür.
+- **Kırpma ve şekil:** düz, yuvarlak köşe, daire, oval.
 - **Dört doku:** Mozaik, Kırık taş, Blok, İri parça.
 - **Çıktı:** Bambu Studio 3MF tablaları (renk renk ya da AMS panelleri), her taşın STL'i, A4/A3 montaj şablonu, kılavuz.
 

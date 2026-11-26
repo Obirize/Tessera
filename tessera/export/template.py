@@ -46,6 +46,8 @@ def write_template(L, out_dir: str, paper: str = "A4") -> str:
 
             def P(x, y):
                 return ((MARGIN + x - x0) * k, (MARGIN + ytop - y) * k)
+            if m.outline is not None:
+                d.line([P(x, h_mm - y) for x, y in m.outline.exterior.coords], fill=(150, 150, 150), width=2)
             box = (x0 - 1, ytop - ch - 1, x0 + cw + 1, ytop + 1)
             for st in L.stones:
                 bx0, by0, bx1, by1 = st.poly.bounds

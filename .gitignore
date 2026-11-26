@@ -20,6 +20,7 @@ cikti/
 !/scripts/iterasyon_kedi_tasarim.py
 !/scripts/qa_ortak.py
 !/scripts/test.py
+!/scripts/sablon_kedi.py
 /ornekler/poster/0*.png
 /ornekler/poster/sayilar.json
 result.json

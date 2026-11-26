@@ -19,6 +19,7 @@ import math
 import numpy as np
 
 from ..geometry.layout import GeoParams, backing_colour_index, panel_xy
+from ..geometry.plate import panel_count, plate_volume
 from ..model import Mode, Mosaic
 
 PLA_DENSITY = 1.24          # g/cm3
@@ -106,8 +107,9 @@ def mass_model_stones(m: Mosaic, mode: str, n_plates=None) -> dict:
     mm = s.mm_per_px
     H, W = m.label.shape
     w_mm, h_mm = W * mm, H * mm
-    art_mm2 = w_mm * h_mm
+    art_mm2 = m.area_mm2
     nx, ny = panel_xy(w_mm, h_mm, s.panel_max_mm)
+    n_panels = panel_count(m)
     if m.polys is not None:              # R8: measured on the real outlines (already without the joint)
         area = np.array([p.area for p in m.polys])
         per = np.array([p.length for p in m.polys])
@@ -131,7 +133,7 @@ def mass_model_stones(m: Mosaic, mode: str, n_plates=None) -> dict:
     swaps = 0
     if mode == Mode.AMS:
         backing_g = art_mm2 * AMS_BASE_T / 1000 * PLA_DENSITY * K_BACKING_AMS
-        plates = nx * ny
+        plates = n_panels
         swaps = int(round(ams_swaps(m, gp, nx, ny) * SWAP_SCALE))
     else:
         usable = (s.plate_mm - 2 * gp.plate_margin) ** 2 * (STONE_PLATE_FILL if m.polys is None else CUT_PLATE_FILL)
@@ -142,7 +144,10 @@ def mass_model_stones(m: Mosaic, mode: str, n_plates=None) -> dict:
             floor = min(art_mm2, perim * gp.frame_w + (per.sum() / 2) * 2 * gp.flange_w
                         + art_mm2 * 3 * gp.brace_w / gp.brace_pitch * 0.8)
             backing_g = (floor * gp.backing_t + per.sum() / 2 * gp.rib_w * gp.rib_h) / 1000 * PLA_DENSITY * K_BACKING
-            plates += nx * ny + 1
+            plates += n_panels + 1
+        elif m.plate is not None:
+            backing_g = plate_volume(m) / 1000 * PLA_DENSITY      # thin everywhere: no infill
+            plates = plates + n_panels if n_plates is None else n_plates
         elif n_plates is not None:
             plates = n_plates
     usable_l = s.plate_mm - 2 * gp.plate_margin
@@ -157,6 +162,18 @@ def mass_model_stones(m: Mosaic, mode: str, n_plates=None) -> dict:
             "swaps": int(swaps), "prime_tower": bool(tower) if mode == Mode.AMS else None,
             "plates": int(plates), "panel_xy": [nx, ny], "colour_g": [float(x) for x in by_col],
             "backing_colour": backing_colour_index(m), "stones": n_st}
+
+
+def split_over_plates(mm_: dict, volumes: list, base: list) -> list:
+    """[(grams, hours)] of every build plate. base: whether it carries the one-piece base plate, which is solid
+    and has its own grams; the rest is shared by volume."""
+    nb = sum(base)
+    bg = mm_["backing_g"] if nb else 0.0
+    bh = bg / G_PER_H + nb * PLATE_H
+    vb = sum(v for v, b in zip(volumes, base) if b) or 1.0
+    vs = sum(v for v, b in zip(volumes, base) if not b) or 1.0
+    return [(bg * v / vb, bh * v / vb) if b else ((mm_["grams"] - bg) * v / vs, (mm_["hours"] - bh) * v / vs)
+            for v, b in zip(volumes, base)]
 
 
 def mass_model(m: Mosaic, mode: str | None = None, plates: int | None = None) -> dict:

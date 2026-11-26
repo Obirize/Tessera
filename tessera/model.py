@@ -95,6 +95,9 @@ class Settings:
     relief_mm: float = 0.0                # how far figure stones stand forward (0 = even surface)
     h_jitter_mm: float = 0.0              # random height difference between stones
     stone_scale: float = 1.0              # stone size factor
+    pieces: object = None                 # how many stones: a number, "sekil" (every shape one stone), None (by texture)
+    shape: Optional[dict] = None          # outline of the artwork (pipeline.kadraj), None = rectangle
+    plate_colour: Optional[int] = None    # palette index of the one-piece base plate the stones sit in (None: no plate)
     detail_adapt: float = 0.7             # R7: 0 = uniform stones, 1 = small stones only where detail needs them
     min_stone_mm: float = 1.2            # R6-3: no printed stone narrower than this (nozzle limit)
     line_mode: str = "auto"               # R6-3: how sub-4 mm lines are kept: "auto"|"row"|"groove"|"step"
@@ -142,6 +145,8 @@ class Mosaic:
     tile_profile: Optional[np.ndarray] = None       # (N,) int: 0 flat, 1 ramp, 2 quarter-round (freud)
     tile_dir: Optional[np.ndarray] = None           # (N,) float radians: slope direction
     tile_hilo: Optional[np.ndarray] = None          # (N, 2) float mm: high/low heights of a profiled stone
+    outline: Optional[object] = None                # the artwork's own outline (shapely, mm, y down), None = the rectangle
+    plate: Optional[object] = None                  # outline of the one-piece base plate (shapely, mm, y down) or None
     grooves: list = field(default_factory=list)     # [{"pts": [[x, y] mm, y down], "width": mm, "depth": mm}]
     groove_depth: float = 0.0
 
@@ -158,9 +163,18 @@ class Mosaic:
         h, w = self.label.shape
         return w * self.settings.mm_per_px, h * self.settings.mm_per_px
 
+    @property
+    def area_mm2(self) -> float:
+        w, h = self.size_mm
+        return w * h if self.outline is None else float(self.outline.area)
+
+    @property
+    def plate_colour(self) -> Optional[int]:
+        return None if self.plate is None else self.settings.plate_colour
+
     def albedo(self, lattice_rgb=(178, 174, 166)) -> np.ndarray:
         """Per-pixel colour. Gaps show a neutral wall/board colour (R6-2: no dark backing assumed)."""
         pal = np.array([f.rgb for f in self.settings.palette], np.float32)
         a = pal[self.colour]
-        a[self.gap] = lattice_rgb
+        a[self.gap] = lattice_rgb if self.plate is None else pal[self.plate_colour]
         return a

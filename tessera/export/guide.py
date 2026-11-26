@@ -269,6 +269,8 @@ def write_guide_stones(L, out_dir: str, mode: str, plates_info: list) -> list[st
                         f"1:1 şablon {L.pages[0]} × {L.pages[1]} A4 sayfa", 24)
     k = min((PAGE_W - 120) / w_mm, (PAGE_H - 560) / h_mm)
     ox, oy = (PAGE_W - w_mm * k) / 2, 190
+    if pieces and m.plate is not None:
+        d.polygon([(ox + x * k, oy + y * k) for x, y in m.plate.exterior.coords], fill=tuple(pal[m.plate_colour].rgb))
     for st in L.stones:
         d.polygon([(ox + x * k, oy + (h_mm - y) * k) for x, y in st.poly.exterior.coords], fill=tuple(pal[st.colour].rgb))
     from .template import page_grid
@@ -288,14 +290,20 @@ def write_guide_stones(L, out_dir: str, mode: str, plates_info: list) -> list[st
     for i, f in enumerate(pal):
         d.rectangle((60, y, 100, y + 30), fill=tuple(f.rgb), outline=INK)
         nn = sum(1 for st in L.stones if st.colour == i)
-        _text(d, (115, y + 2), f"{L.letters[i]} = {f.name} ({FINISH_TR.get(f.finish, f.finish)})  ·  {nn} taş", 22)
+        what = f"tek parça taban ({len(L.panels)} tabla)" if pieces and m.plate is not None and i == m.plate_colour and not nn else f"{nn} taş"
+        _text(d, (115, y + 2), f"{L.letters[i]} = {f.name} ({FINISH_TR.get(f.finish, f.finish)})  ·  {what}", 22)
         y += 40
     pages.append(pg)
     # steps
     pg = Image.new("RGB", (PAGE_W, PAGE_H), "white")
     d = ImageDraw.Draw(pg)
     _text(d, (60, 50), "Nasıl dizilir?", 40)
+    base = pieces and m.plate is not None
     steps = [
+        f"1. Tabanı bas: 02_tablalar/0_Taban dosyası. {len(L.panels)} parça, rengi {pal[m.plate_colour].name}.",
+        "2. Taban birden çok parçaysa düz bir levhanın üstünde yan yana diz ve yapıştır (adları kılavuzdaki sıradadır)."
+        if len(L.panels) > 1 else "2. Tabanı masaya koy; istersen önce duvara ya da levhaya yapıştır.",
+    ] if base else [
         "1. Şablonu yazdır: 00_sablon_1-1_A4.pdf (ya da A3) dosyasını %100 / 'gerçek boyut' ile yazdır. "
         "Her sayfadaki 100 mm cetveli ölç.",
         "2. Sayfaları birleştir: kırmızı şeritler komşu sayfayla üst üste gelir; kırmızı artı işaretlerini "
@@ -303,14 +311,21 @@ def write_guide_stones(L, out_dir: str, mode: str, plates_info: list) -> list[st
         "3. Zemin: şablonu levhanın (MDF/kontrplak) ya da duvarın üstüne bantla. İstersen şablonun altına "
         "karbon kâğıdı koyup çizgileri zemine geçir.",
     ]
-    if pieces:
+    if base:
+        steps += [
+            "3. Taşları renk renk bas. Her taş tabanda kendi yuvasına oturur; yuvanın dibinde taşın numarası yazar.",
+            "4. 8 mm'den büyük taşların kodu altında aynalı yazılıdır; kodun son sayısı yuvadaki numaradır. "
+            "Küçük taşları tabla haritasından (02_tablalar/onizleme) ya da 1:1 şablondan bul.",
+            "5. Yuvaya bir damla yapıştırıcı koy, taşı bastır. Kâğıt şablona gerek yok; istersen yine yazdırabilirsin.",
+        ]
+    elif pieces:
         steps += [
             "4. Tablalar şablon sayfalarına göre sıralıdır: önce A1 sayfasının taşlarını içeren tablaları bas; "
             "o sayfayı dizerken sıradaki tablalar basılır.",
             "5. Her taşın kodu şablonda yazar. 8 mm'den büyük taşların kodu altında da aynalı yazılıdır. "
             "Küçük taşları tabla haritasındaki (02_tablalar/onizleme) yerlerinden tanırsın.",
             "6. Yapıştır: taşın altına bir damla jel süper yapıştırıcı ya da şeffaf silikon; şablondaki yerine bastır. "
-            "Taşlar arasında 1,2 mm boşluk kalır; derz gerekmez.",
+            f"Taşlar arasında {str(round(s.gap_mm, 1)).replace('.', ',')} mm boşluk kalır; derz gerekmez.",
             "7. Yan basılan Freud taşları (kavisli yüz) tabladan çıkınca yatırılır; kavisli yüz dışa bakar.",
         ]
         if getattr(s, "backing", "yok") == "kafes":

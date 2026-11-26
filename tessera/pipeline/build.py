@@ -17,8 +17,10 @@ from typing import Callable, Optional
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 from scipy import ndimage as ndi
+from shapely.geometry import box
 
 from ..model import VOCAB_NAMES_TR, Mode, Mosaic, Settings, Vocab
+from ..resim import open_rgb  # noqa: F401 (kept outside the pipeline: the window opens pictures at start)
 from .colour import absorb_islands, quantize_detail, thin_masks
 from .descreen import descreen as descreen_image
 from .lines import handle_lines
@@ -72,43 +74,6 @@ def working_mm_per_px(width_mm: float, preview: bool = False) -> float:
     (up to 300 cm) within time and memory budgets."""
     w = float(width_mm)
     return max(0.8, w / 1300.0) if preview else max(0.4, w / 2600.0)
-
-
-def open_rgb(path_or_img) -> Image.Image:
-    """Open any supported picture as RGB. Transparent areas are laid on white (a transparent
-    logo must not become a black mosaic). Raises ValueError with a Turkish message for
-    missing, empty, corrupt or unsupported files."""
-    if isinstance(path_or_img, np.ndarray):
-        a = path_or_img
-        if a.ndim == 2:
-            a = np.stack([a] * 3, -1)
-        if a.ndim != 3 or a.shape[2] not in (3, 4) or min(a.shape[:2]) < 2:
-            raise ValueError("Görsel okunamadı: beklenen renkli bir resim (yükseklik × genişlik × 3).")
-        im = Image.fromarray(a.astype(np.uint8))
-    elif isinstance(path_or_img, Image.Image):
-        im = path_or_img
-    else:
-        try:
-            im = Image.open(path_or_img)
-            im.load()
-        except FileNotFoundError:
-            raise
-        except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as e:
-            name = str(path_or_img).replace("\\", "/").split("/")[-1]
-            raise ValueError(f"Görsel açılamadı: '{name}' bozuk ya da desteklenmeyen bir biçimde. "
-                             f"PNG, JPG veya WEBP olarak yeniden kaydedip dene.") from e
-    try:
-        has_alpha = im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info)
-        if has_alpha:
-            rgba = im.convert("RGBA")
-            bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
-            im = Image.alpha_composite(bg, rgba)
-        im = im.convert("RGB")
-    except (OSError, ValueError) as e:
-        raise ValueError("Görsel açılamadı: renk biçimi desteklenmiyor. PNG ya da JPG olarak kaydedip dene.") from e
-    if min(im.size) < 2:
-        raise ValueError("Görsel çok küçük (en az 2 × 2 piksel olmalı).")
-    return im
 
 
 def _floor_resolution(settings: Settings) -> None:
@@ -573,8 +538,9 @@ def _gap_band(lab: np.ndarray, gw: int) -> np.ndarray:
 
 def _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, mark, report, labels, zoom):
     """R8: cut-first stones. The outlines are exact polygons; the rasters only serve numbers and zones."""
-    from . import kesim
+    from . import kadraj, kesim
     h, w = img.shape[:2]
+    mm = settings.mm_per_px
     src = _as_rgb_array(source if source is not None or isinstance(image, np.ndarray) else image)
     if src is None or src.shape[1] < img.shape[1]:
         src = img
@@ -593,7 +559,12 @@ def _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, 
         pf = _check_palette(settings)
         same = np.array([int(np.flatnonzero((pal == c).all(1))[0]) for c in pf])
         to = same[np.clip(np.asarray([int(c["hedef"]) for c in cols]), 0, len(pf) - 1)]
-    r = kesim.build(src, w * settings.mm_per_px, pal, colours=cols, to=to, zoom=zoom, labels=labels,
+    base = settings.plate_colour
+    if base is not None:
+        base = int(np.flatnonzero((pal == _check_palette(settings)[base]).all(1))[0])
+    shape = kadraj.outline(settings.shape, w * mm, h * mm)
+    r = kesim.build(src, w * mm, pal, colours=cols, to=to, zoom=zoom, labels=labels,
+                    pieces=settings.pieces, base=base, shape=shape,
                     layout=settings.style, zone=zone, centre=centre,
                     gap=float(settings.gap_mm), size=float(getattr(settings, "stone_scale", 1.0)),
                     seed=int(settings.seed), ams=ams, report=lambda f, m: report(0.06 + 0.88 * f, m))
@@ -607,7 +578,6 @@ def _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, 
     ns = int(r["stone"].max()) + 1
     jit = np.round(rng.uniform(0, 1, ns) * float(settings.h_jitter_mm) / 0.2) * 0.2
     top = float(settings.stone_h_mm) + np.where(fig, float(settings.relief_mm), 0.0) + jit[r["stone"]]
-    mm = settings.mm_per_px
     cen = np.array([(p.centroid.x, p.centroid.y) for p in polys]) / mm
     area = np.array([p.area for p in polys])
     # raster view of the same polygons
@@ -630,9 +600,13 @@ def _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, 
                  tile_area_px=np.maximum(1, np.round(area / mm ** 2)).astype(int), tile_centroid=cen,
                  tile_plane=np.stack([top, np.zeros(n), np.zeros(n)], 1))
     mos.polys = polys
+    mos.outline = shape
+    if base is not None and not ams:             # with the AMS everything is printed together anyway
+        mos.plate = shape or box(0, 0, w * mm, h * mm)
     mos.style = settings.style
     mos.stats = quick_stats(mos)
-    mos.stats.update({"stil": LAYOUTS[settings.style], "tas_sayisi": len(set(r["stone"].tolist())), "parca": n})
+    mos.stats.update({"stil": LAYOUTS[settings.style], "tas_sayisi": len(set(r["stone"].tolist())), "parca": n,
+                      "alan": r["areas"], "cizgi": None if r["contour"] is None else int(to_full[r["contour"]])})
     mark("istatistik", 1.0, "Hazır")
     return mos
 

@@ -43,14 +43,15 @@
           <span class="drop-t">Görsel seç</span>
           <span class="drop-s">ya da dosyayı pencereye sürükle</span>
         </button>
-        <button class="link small" id="btn-example">Örnek afişle başla</button>
       </div>
       <div class="pick-full">
         <div class="source">
-          <img id="src-thumb" alt="" title="Başka görsel seç">
+          <img id="src-thumb" alt="" title="Kırp, şekil ver">
           <div class="source-meta">
             <div class="source-name" id="src-name"></div>
             <button class="link small muted" id="btn-change">Başka görsel</button>
+            <button class="link small muted" id="btn-edit">Kırp, şekil ver</button>
+            <button class="link small muted" id="btn-tpl">Şablonlar</button>
           </div>
           <label class="width" title="Eserin duvardaki genişliği">
             <span class="field"><input id="in-width" type="number" min="10" max="300" step="1"><span class="unit">cm</span></span>
@@ -59,6 +60,7 @@
         </div>
         <div class="fit" id="fit"><i></i><div><span id="fit-t"></span> <button class="link small" id="fit-b"></button></div></div>
       </div>
+      <div class="tpls" id="tpls"><div class="tpls-t">Hazır şablonlar</div><div class="tpls-g" id="tpls-g"></div></div>
     </section>
 
     <section class="q" id="q-colours">
@@ -82,7 +84,16 @@
     <section class="q" id="q-style">
       <h2><span class="n">3</span>Nasıl bir doku?</h2>
       <div class="styles" id="styles"></div>
-      
+      <div class="piece" id="piece">
+        <div class="piece-t">Parça sayısı</div>
+        <div class="seg" id="pc-mode"><button data-v="auto">Dokuya göre</button><button data-v="sekil">Her şekil tek taş</button><button data-v="sayi">Sayı ver</button></div>
+        <div class="piece-n" id="pc-n">
+          <span class="field"><input id="in-pc" type="number" min="2" max="20000" step="1"><span class="unit">taş</span></span>
+          <input type="range" id="pc-r" min="0" max="1000" step="1">
+        </div>
+        <div class="piece-s" id="pc-s"></div>
+        <label class="check only-parca" id="pc-base"><input type="checkbox" id="in-base"><i></i><span id="pc-base-t"></span></label>
+      </div>
     </section>
 
     <section class="q" id="q-make">
@@ -91,7 +102,7 @@
         <button class="mode" data-mode="parca">
           <span class="mode-t">Tek renk tablalar</span>
           <span class="mode-k">AMS gerekmez</span>
-          <span class="mode-s">Her taş ayrı ve tek renk. Baskıda renk hiç değişmez; taşları kâğıt şablona göre dizersin.</span>
+          <span class="mode-s" id="mode-s">Her taş ayrı ve tek renk. Baskıda renk hiç değişmez; taşları kâğıt şablona göre dizersin.</span>
           <span class="mode-n" id="n-parca">&nbsp;</span>
         </button>
         <button class="mode" data-mode="ams">
@@ -199,6 +210,7 @@
 
     <h4>Baskı</h4>
     <div class="row only-parca"><span class="r-t">Tablaların sırası</span><div class="seg" id="f-tabla"><button data-v="panel">Şablon sırasıyla</button><button data-v="renk">En az tabla</button></div><span class="r-h">Şablon sırasında, ilk tablalar biter bitmez dizmeye başlayabilirsin.</span></div>
+    <div class="row only-parca"><span class="r-t">Tek parça taban</span><div class="seg" id="f-tek_taban"></div><span class="r-h">Seçtiğin renk taş olmaz, taşların oturduğu taban olur. Siyah çizgili görsellerde iyi durur.</span></div>
     <label class="row only-ams"><span class="r-t">Panel boyu <b id="f-panel-v"></b></span><input type="range" id="f-panel" min="150" max="240" step="5"><span class="r-e"><i>Küçük</i><i>Tabla kadar</i></span></label>
     <div class="row only-ams"><span class="r-t">Panel tabanının rengi</span><div class="seg" id="f-taban"></div></div>
 
@@ -208,6 +220,44 @@
   <footer><button class="link small muted" id="fine-reset">Hepsini varsayılana döndür</button></footer>
 </aside>
 
+
+<section id="prep">
+  <div class="p-left">
+    <div class="p-top"><span class="p-h">Görseli hazırla</span><span class="p-ad" id="p-ad"></span>
+      <div class="seg" id="p-tab"><button data-v="gorsel">Görsel</button><button data-v="taslar">Taşlar</button></div></div>
+    <div class="p-view" id="p-view">
+      <img class="p-img" id="p-img" alt="" draggable="false"><svg id="p-svg"></svg>
+      <img class="p-stones" id="p-stones" alt="" draggable="false">
+      <div class="p-busy"><span id="p-msg"></span><div class="bar"><i id="p-bar"></i></div></div>
+    </div>
+    <div class="p-num" id="p-num"></div>
+  </div>
+  <div class="p-side">
+    <div class="p-scroll">
+      <section class="q"><h2><span class="n">1</span>Kadraj</h2>
+        <div class="seg" id="p-ratio"><button data-v="tamam">Tamamı</button><button data-v="kare">Kare</button><button data-v="dikey">Dikey</button><button data-v="yatay">Yatay</button><button data-v="serbest">Serbest</button></div>
+        <div class="p-links"><button class="link small" id="p-don">Döndür</button><button class="link small" id="p-ayna">Aynala</button><span>Köşelerden tutup çekebilirsin.</span></div>
+      </section>
+      <section class="q"><h2><span class="n">2</span>Şekil</h2>
+        <div class="p-shapes" id="p-shape"><button data-v="dikdortgen"><i></i>Düz</button><button data-v="yuvarlak"><i></i>Yuvarlak köşe</button><button data-v="daire"><i></i>Daire</button><button data-v="oval"><i></i>Oval</button></div>
+        <label class="p-rr" id="p-rr"><span>Köşe yuvarlağı</span><input type="range" id="p-r" min="0.05" max="0.5" step="0.01" value="0.15"></label>
+      </section>
+      <section class="q"><h2><span class="n">3</span>Boyut</h2>
+        <div class="p-size"><span class="field"><input id="p-w" type="number" min="10" max="300" step="1"><span class="unit">cm</span></span><span class="derived" id="p-h"></span></div>
+      </section>
+      <section class="q"><h2><span class="n">4</span>Kaç parça?</h2>
+        <div class="piece" id="p-piece">
+          <div class="seg" id="p-pc-mode"><button data-v="auto">Dokuya göre</button><button data-v="sekil">Her şekil tek taş</button><button data-v="sayi">Sayı ver</button></div>
+          <div class="piece-n"><span class="field"><input id="p-pc" type="number" min="2" max="20000" step="1"><span class="unit">taş</span></span><input type="range" id="p-pc-r" min="0" max="1000" step="1"></div>
+          <div class="piece-s" id="p-pc-s"></div>
+          <label class="check p-base" id="p-base"><input type="checkbox" id="p-base-c"><i></i><span id="p-base-t"></span></label>
+        </div>
+      </section>
+      <div class="fit" id="p-fit"><i></i><div id="p-fit-t"></div></div>
+    </div>
+    <div class="p-foot"><button class="link muted" id="p-other">Başka görsel</button><button class="link muted" id="p-cancel">Vazgeç</button><button class="primary" id="p-ok">Ekle</button></div>
+  </div>
+</section>
 
 <script type="module" src="app.js"></script>
 </body>

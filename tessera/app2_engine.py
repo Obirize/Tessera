@@ -77,21 +77,22 @@ def style_cards() -> list[dict]:
 
 
 def main_colours() -> list[dict]:
-    from .pipeline.renk import TONES
+    from .renkler import TONES
     return [{"name": n, "hex": h} for n, h in TONES]
 
 
 def main_hex(name: str) -> Optional[str]:
-    from .pipeline.renk import TONES
+    from .renkler import TONES
     return dict(TONES).get(name)
 
 
-@lru_cache(maxsize=1)
-def _look(path: str, mtime: float, width_mm: float, descreen_mode) -> tuple:
+@lru_cache(maxsize=2)
+def _look(path: str, mtime: float, width_mm: float, descreen_mode, frame: str = "null") -> tuple:
     """What does not depend on any wish: (picture, native width, kind, softness, () -> its own flat colours)."""
     from .pipeline import renk, sade
     from .pipeline.build import open_capped, screen_free
-    img, native = open_capped(path)
+    from .pipeline.kadraj import picture
+    img, native = open_capped(picture(path, *(json.loads(frame) or ())))
     if descreen_mode is not False:
         img = screen_free(img, descreen_mode, width_mm)
     own = cache(lambda: renk.find(img))
@@ -100,12 +101,13 @@ def _look(path: str, mtime: float, width_mm: float, descreen_mode) -> tuple:
 
 
 def analyse(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[int] = None,
-            tur: str = "auto") -> tuple:
-    """(colours, advice). colours: the picture's main colours, each with the colour that stands for it in
+            tur: str = "auto", frame: Optional[list] = None) -> tuple:
+    """frame: [kadraj, sekil] when not the whole picture is meant. (colours, advice). colours: the picture's main colours, each with the colour that stands for it in
     the mosaic [{"rgb", "pay", "oz", "ad", "hex"}], largest first; a photograph or painting (tur "ton") is
     simplified and its colours carry "yol": "ton". advice: {"tur", "puan": "iyi"|"orta"|"zor", "soz": [...]}"""
     from .pipeline import renk, sade
-    img, native, k, soft, own = _look(image_path, os.path.getmtime(image_path), width_mm, descreen_mode)
+    img, native, k, soft, own = _look(image_path, os.path.getmtime(image_path), width_mm, descreen_mode,
+                                      json.dumps(frame))
     kind = "ton" if tur == "ton" else "net" if tur == "net" and k == "ton" else k
     if kind == "ton":
         found = sade.find(img, width_mm, n)
@@ -191,7 +193,7 @@ def advise_again(r: "Recipe") -> dict:
     """The same picture at another size: what to know about it (the kind of picture does not change)."""
     from .pipeline.build import open_capped
     u = r.uygun
-    return advice(*open_capped(r.image_path), r.width_mm, u["bulunan"], u["tur"], u["yumusak"])
+    return advice(*open_capped(r.source()), r.width_mm, u["bulunan"], u["tur"], u["yumusak"])
 
 
 def unique_names(colours: list) -> list:
@@ -222,6 +224,8 @@ FINE_DEFAULTS = {
     "oynama": 0.0,             # random height difference between stones, mm
     "panel": 240.0,            # AMS panel size, mm
     "taban": None,             # AMS base plate colour (hex of a paint in use; None = most neutral)
+    "parca": None,             # how many stones: a number, "sekil" (every shape one stone), None (texture and size decide)
+    "tek_taban": None,         # this colour (hex) is no stones but the one-piece plate they sit in; None = no plate
     "tur": "auto",             # kind of picture: auto | net (flat art) | ton (photograph, painting)
     "tram": "auto",            # dotted (printed) pictures: auto | True | False
     "otomatik_bolge": True,    # find rays/figures on pictures without zones
@@ -229,7 +233,15 @@ FINE_DEFAULTS = {
     "renk_sayisi": None,       # how many colours to look for (None = as many as the picture has)
     "tohum": 7,                # another arrangement of the same stones
 }
+PAINT_SETTINGS = ("taban", "tek_taban")      # fine settings that name a paint in use
 LIGHT_AZ, LIGHT_EL = -125.0, 36.0  # the one fixed light (upper left, raking); no light controls
+
+
+def piece_count(v):
+    """A wish for the number of stones as the pipeline takes it."""
+    if v == "sekil":
+        return v
+    return max(2, min(20000, int(v))) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
 @dataclass
@@ -250,6 +262,37 @@ class Recipe:
     light_az: float = -130.0
     light_el: float = 40.0
     name: str = ""
+    kadraj: Optional[dict] = None                     # the part of the picture that is used (pipeline.kadraj), None = all
+    sekil: Optional[dict] = None                      # the artwork's outline, None = rectangle
+
+    @property
+    def frame(self) -> Optional[list]:
+        return None if self.kadraj is None and self.sekil is None else [self.kadraj, self.sekil]
+
+    def source(self):
+        """What the pipeline reads: the picture's path, or its used part as an array."""
+        from .pipeline.kadraj import picture
+        return picture(self.image_path, self.kadraj, self.sekil)
+
+    def set_frame(self, kadraj, sekil) -> bool:
+        """Another part or outline; what was found on the picture before does not fit any more. Whether it changed."""
+        from .pipeline.kadraj import clean_frame, clean_shape
+        kadraj, sekil = clean_frame(kadraj), clean_shape(sekil)
+        if (kadraj, sekil) == (self.kadraj, self.sekil):
+            return False
+        self.kadraj, self.sekil = kadraj, sekil
+        self.zone_mask = None
+        if not self.zones_from_file:
+            self.rays_center = None
+        return True
+
+    def zones(self, size_wh) -> tuple:
+        """(zone shapes, ray centre) of the picture's own file, as fractions of the used part."""
+        from .pipeline.kadraj import to_frame, zones_to_frame
+        if self.kadraj is None or not self.zones_from_file:
+            return self.shapes, self.rays_center
+        rc = None if self.rays_center is None else [float(v) for v in to_frame(*self.rays_center, self.kadraj)]
+        return zones_to_frame(self.shapes, self.kadraj, size_wh[0] / size_wh[1]), rc
 
     def copy(self) -> "Recipe":
         r = copy.copy(self)
@@ -264,17 +307,18 @@ class Recipe:
         self.colours = colours
         u = unique_names(colours)
         self.palette = [n for n, _ in u]
-        if self.fine.get("taban") not in [h for _, h in u]:
-            self.fine["taban"] = None                 # that paint is not used any more
+        for k in PAINT_SETTINGS:
+            if self.fine.get(k) not in [h for _, h in u]:
+                self.fine[k] = None                   # that paint is not used any more
 
     def targets(self) -> list:
         """Palette index of every colour of the picture."""
         u = [h for _, h in unique_names(self.colours)]
         return [u.index(c["hex"].upper()) for c in self.colours]
 
-    def base_index(self) -> Optional[int]:
-        """Palette position of the AMS base plate's colour."""
-        t = (self.fine or {}).get("taban")
+    def base_index(self, key: str = "taban") -> Optional[int]:
+        """Palette position of the AMS base plate's colour (or of another fine setting that names a paint)."""
+        t = (self.fine or {}).get(key)
         if isinstance(t, str):
             u = [h for _, h in unique_names(self.colours)]
             return u.index(t.upper()) if t.upper() in u else None
@@ -288,7 +332,7 @@ class Recipe:
         if shape_only and self.colours:
             d.pop("palette")
             d["colours"] = [[c["oz"], t] for c, t in zip(self.colours, self.targets())]
-            d["fine"] = {**d["fine"], "taban": self.base_index()}
+            d["fine"] = {**d["fine"], **{k: self.base_index(k) for k in PAINT_SETTINGS}}
         h.update(json.dumps(d, sort_keys=True, default=str).encode())
         if self.zone_mask is not None:
             h.update(self.zone_mask.tobytes())
@@ -299,6 +343,7 @@ class Recipe:
         from .pipeline import working_mm_per_px
         s = Settings()
         s.width_mm = float(self.width_mm)
+        s.shape = self.sekil
         if self.colours:
             s.palette = [filament_for(n, h) for n, h in unique_names(self.colours)]
             s.source_colours = [{"rgb": list(c["rgb"]), "oz": c["oz"], "hedef": t, "yol": c.get("yol", "")}
@@ -319,6 +364,8 @@ class Recipe:
         s.merge_same_colour = False                   # every stone is its own piece
         s.backing = "yok"
         s.base_colour = self.base_index()
+        s.pieces = piece_count(f.get("parca"))
+        s.plate_colour = self.base_index("tek_taban")
         s.descreen = f.get("tram", "auto")
         s.plate_order = "renk" if f.get("tabla_sirasi") == "renk" else "panel"
         s.seed = int(f.get("tohum", 7))
@@ -355,6 +402,7 @@ class Recipe:
 def recipe_extra(r: Recipe) -> dict:
     """What a project file needs beyond Project's own fields (stored in its 'ad' block free keys)."""
     return {"stil": style_name(r.style), "ince_ayar": r.fine, "renkler": r.colours, "uygun": r.uygun, "bolge_dosyadan": r.zones_from_file,
+            "kadraj": r.kadraj, "sekil": r.sekil,
             "dosya_varsayilan": r.file_default_vocab}
 
 
@@ -393,12 +441,13 @@ def build_mosaic_for(r: Recipe, preview: bool = True, image_cache: Optional[dict
     from .pipeline import build_mosaic, load_image, zones_from_shapes
     prog = progress or (lambda f, msg: None)
     s = s or r.settings(preview)
-    key = (r.image_path, round(s.width_mm, 3), s.mm_per_px, str(s.descreen))
+    src, frame = r.source(), json.dumps(r.frame)
+    key = (r.image_path, frame, round(s.width_mm, 3), s.mm_per_px, str(s.descreen))
     if image_cache is not None and image_cache.get("key") == key:
         img = image_cache["img"]
     else:
         prog(0.0, "Görsel okunuyor")
-        img = load_image(r.image_path, s)
+        img = load_image(src, s)
         if image_cache is not None:
             image_cache.clear()
             image_cache.update(key=key, img=img)
@@ -408,7 +457,7 @@ def build_mosaic_for(r: Recipe, preview: bool = True, image_cache: Optional[dict
     found = None
     if (mask is None and not r.zones_from_file and not r.shapes
             and (r.fine or {}).get("otomatik_bolge", True)):
-        ak = (r.image_path, h, w)
+        ak = (r.image_path, frame, h, w)
         if auto_zone_cache is not None and ak in auto_zone_cache:
             found = auto_zone_cache[ak]
         else:
@@ -420,17 +469,24 @@ def build_mosaic_for(r: Recipe, preview: bool = True, image_cache: Optional[dict
         if r.rays_center is None and found.get("rays_center"):
             rc = found["rays_center"]
             s.rays_center = (rc[0] * w, rc[1] * h)
-    if r.rays_center:
-        s.rays_center = (r.rays_center[0] * w, r.rays_center[1] * h)
-    zone = zones_from_shapes((h, w), r.shapes, default=int(s.default_vocab))
+    shapes, rc = r.zones(picture_size(r.image_path) if r.kadraj and r.zones_from_file else (w, h))
+    if rc:
+        s.rays_center = (rc[0] * w, rc[1] * h)
+    zone = zones_from_shapes((h, w), shapes, default=int(s.default_vocab))
     zone = apply_paint(zone, mask, int(s.default_vocab))
     if _build_accepts_progress():
-        m = build_mosaic(img, s, zone, source=r.image_path, progress=lambda f, msg="": prog(0.15 + 0.85 * float(f), str(msg)))
+        m = build_mosaic(img, s, zone, source=src, progress=lambda f, msg="": prog(0.15 + 0.85 * float(f), str(msg)))
     else:
         prog(0.2, "Renkler ayrılıyor")
         m = build_mosaic(img, s, zone)
     prog(1.0, "Mozaik hazır")
     return m, found
+
+
+def picture_size(path: str) -> tuple:
+    from PIL import Image
+    with Image.open(path) as im:
+        return im.size
 
 
 def auto_zones(img: np.ndarray, s: Settings) -> dict:
@@ -471,6 +527,22 @@ def estimates(m) -> dict:
     return out
 
 
+def piece_info(m) -> dict:
+    """What the piece-count control shows: shapes in the picture, sensible numbers, stones too thin to lay."""
+    if m.polys is None:
+        return {}
+    a, length = (np.array([getattr(p, k) for p in m.polys]) for k in ("area", "length"))
+    area = m.area_mm2
+    alan = int(m.stats.get("alan", 0))
+    cizgi = m.stats.get("cizgi")
+    f = None if cizgi is None or cizgi >= len(m.settings.palette) else m.settings.palette[cizgi]
+    en_az = max(4, alan // 2)
+    lines = m.settings.plate_colour              # with the AMS these are printed along and not counted
+    return {"alan": alan, "sayi": int((np.asarray(m.tile_colour) != (-1 if lines is None else lines)).sum()), "dar": int((2 * a / length < 2.5).sum()), "orta_mm": round(float(np.sqrt(a.mean())), 1),
+            "en_az": en_az, "en_cok": max(2 * en_az, 2 * alan, int(area / 45)), "rahat": max(alan, int(area / 100)),
+            "cizgi": f and {"ad": f.name, "hex": f.hex}}
+
+
 def png_bytes(a: np.ndarray, fmt: str = "PNG", quality: int = 88) -> bytes:
     from PIL import Image
     bio = io.BytesIO()
@@ -498,18 +570,27 @@ def thumb_mosaic(img: np.ndarray, r: "Recipe", s: Settings, found: Optional[dict
     from .pipeline import build_mosaic, sade, zones_from_shapes
     h, w = img.shape[:2]
     side = int(min(h, w) * 0.34)
-    g = img.mean(2)
-    dens = ndi.uniform_filter(ndi.gaussian_gradient_magnitude(g, 2.0), side)
+    g = ndi.gaussian_gradient_magnitude(img.mean(2), 2.0)
+    s = copy.copy(s)
+    if s.shape:                         # the detail is a plain square from within the outline
+        from .pipeline.kadraj import mask, outline
+        p = outline(s.shape, w, h)
+        g = np.where(mask(p, (w, h), 1.0), g, -float(g.max())) if p is not None else g
+        s.shape = None
+    dens = ndi.uniform_filter(g, side)
     dens[: side // 2] = dens[-(side // 2):] = 0
     dens[:, : side // 2] = dens[:, -(side // 2):] = 0
     y, x = np.unravel_index(int(np.argmax(dens)), dens.shape)
     y0, x0 = int(y - side // 2), int(x - side // 2)
-    s = copy.copy(s)
-    zone = zones_from_shapes((h, w), r.shapes, default=int(s.default_vocab))
+    shapes, rays = r.zones(picture_size(r.image_path) if r.kadraj and r.zones_from_file else (w, h))
+    zone = zones_from_shapes((h, w), shapes, default=int(s.default_vocab))
     zone = apply_paint(zone, r.zone_mask if r.zone_mask is not None else (found or {}).get("mask"), int(s.default_vocab))
-    rc = r.rays_center or (found or {}).get("rays_center")
+    rc = rays or (found or {}).get("rays_center")
     s.rays_center = (rc[0] * w - x0, rc[1] * h - y0) if rc else None
     s.width_mm = s.width_mm * side / w
+    if isinstance(s.pieces, int):
+        s.pieces = round(s.pieces * side * side / (h * w))
+        s.pieces = s.pieces if s.pieces >= 16 else "sekil"      # too few to thin out in a detail
     s.descreen = False                  # img is already free of print dots
     labels = None
     if sade.tonal(r.colours):           # simplified as a whole, then the detail is cut out
@@ -564,16 +645,18 @@ class Engine:
     on_scene(gen, glb bytes, meta dict)    real part meshes (fast quality), right after
     on_thumb(gen, style, jpeg bytes)       style cards
     on_palette(gen, colours, advice)       the picture's colours and what to know about it
+    on_draft(gen, dict)                    the stones of the preparation window
     on_error(gen, kind, message_tr)
     on_busy(bool, message_tr)
     """
 
     def __init__(self, on_built, on_scene, on_thumb, on_palette, on_error, on_busy, on_progress=None,
-                 on_plates=None, on_advice=None):
+                 on_plates=None, on_advice=None, on_draft=None):
         self.cb = dict(built=on_built, scene=on_scene, thumb=on_thumb, palette=on_palette,
                        error=on_error, busy=on_busy, progress=on_progress or (lambda gen, f, msg: None),
                        plates=on_plates or (lambda gen, glb, meta: None),
-                       advice=on_advice or (lambda path, width, a: None))
+                       advice=on_advice or (lambda path, width, a: None),
+                       draft=on_draft or (lambda gen, d: None))
         self._cv = threading.Condition()
         self._build: Optional[tuple] = None      # (gen, recipe)
         self._jobs: list = []                    # low priority: ("thumbs", gen, recipe) ...
@@ -582,6 +665,11 @@ class Engine:
         self._image_cache: dict = {}
         self._zones: dict = {}
         self._thumb_cache: dict = {}
+        self._draft: Optional[dict] = None       # the preparation window's newest stones, for when it is accepted
+        self._draft_image: dict = {}             # its caches: the project's stay as they are until then
+        self._draft_zones: dict = {}
+        self._kind = ""                          # what is running
+        self._stop_draft = False
         self.mosaic = None
         self.mosaic_key = ""
         self.mosaic_shape = ""
@@ -610,6 +698,20 @@ class Engine:
         with self._cv:
             self._jobs = [j for j in self._jobs if j[0] != "detect"]
 
+    def draft(self, gen: int, r: Recipe, find: bool) -> None:
+        """Stones for the preparation window. find: look for the colours first."""
+        with self._cv:
+            self._jobs = [("draft", gen, r.copy(), find)] + [j for j in self._jobs if j[0] != "draft"]
+            self._cv.notify()
+
+    def cancel_draft(self, keep: bool = False) -> None:
+        """Nobody waits for a draft any more. keep: the finished one is about to be built."""
+        with self._cv:
+            self._jobs = [j for j in self._jobs if j[0] != "draft"]
+            self._stop_draft = True
+            if not keep:
+                self._draft = None
+
     def advise(self, gen: int, r: Recipe) -> None:
         self._push(("advise", gen, r.copy()))
 
@@ -627,6 +729,10 @@ class Engine:
     def superseded(self) -> bool:
         """Whether something newer than the running job is waiting."""
         with self._cv:
+            if self._kind == "draft":
+                return self._stop or self._stop_draft or any(j[0] == "draft" for j in self._jobs)
+            if self._kind == "thumbs" and any(j[0] == "draft" for j in self._jobs):
+                return True
             return (self._stop or self._build is not None
                     or any(j[0] == "detect" and j[1] > self._gen for j in self._jobs))
 
@@ -648,6 +754,8 @@ class Engine:
                 else:
                     job = self._jobs.pop(0)
                 self._gen = job[1] if len(job) > 1 else -1
+                self._kind = job[0]
+                self._stop_draft = False
             try:
                 getattr(self, "_do_" + job[0])(*job[1:])
             except Superseded:
@@ -679,6 +787,11 @@ class Engine:
         found = None
         if key != self.mosaic_key and self.mosaic is not None and r.colours and shape == self.mosaic_shape:
             self.mosaic, self.mosaic_key = repaint(self.mosaic, r.settings(True).palette), key    # only a paint was changed
+        elif self._draft is not None and self._draft["key"] == key:      # already made in the preparation window
+            m, found = self._draft["m"], self._draft["found"]
+            self._image_cache, self._zones = self._draft_image, self._draft_zones
+            self._draft, self._draft_image, self._draft_zones = None, {}, {}
+            self.mosaic, self.mosaic_key, self.mosaic_shape = m, key, shape
         elif key != self.mosaic_key or self.mosaic is None:
             m, found = build_mosaic_for(r, True, self._image_cache, self._zones,
                                         progress=lambda f, msg: P(0.02 + 0.86 * max(0.0, min(1.0, f)), msg))
@@ -696,6 +809,7 @@ class Engine:
             "mode": m.settings.mode,
             "palette": [{"name": f.name, "hex": f.hex} for f in m.settings.palette],
             "tiles": int(m.n_tiles),
+            "parca": piece_info(m),
             "seconds": round(time.perf_counter() - t0, 2),
             "zones": None if found is None else {"rays_center": found.get("rays_center"),
                                                  "reasons": found.get("reasons", []),
@@ -714,6 +828,43 @@ class Engine:
         self._check()
         self.cb["scene"](gen, glb, _plain(meta))
         self._push(("plates", gen, m))
+
+    def _do_draft(self, gen: int, r: Recipe, find: bool) -> None:
+        def P(f, msg):
+            self._check()
+            self.cb["draft"](gen, {"f": float(f), "msg": msg})
+        new = {}
+        P(0.0, "Renkler bulunuyor" if find else "Taşlar hesaplanıyor")
+        if find:
+            f = {**FINE_DEFAULTS, **(r.fine or {})}
+            colours, adv = analyse(r.image_path, r.width_mm, f.get("tram", "auto"), f.get("renk_sayisi"),
+                                   f.get("tur", "auto"), r.frame)
+            r.use_colours(settle(colours, r.colours))
+            r.uygun = adv
+            new = {"colours": copy.deepcopy(r.colours), "uygun": adv}
+        elif r.uygun:
+            r.uygun = new_advice = advise_again(r)
+            new = {"colours": copy.deepcopy(r.colours), "uygun": new_advice}
+        key = r.build_key()
+        if self._draft is not None and self._draft["key"] == key:
+            m = self._draft["m"]
+        elif key == self.mosaic_key and self.mosaic is not None:
+            m = self.mosaic
+        else:
+            m, found = build_mosaic_for(r, True, self._draft_image, self._draft_zones,
+                                        progress=lambda f, msg: P(0.1 + 0.8 * max(0.0, min(1.0, f)), msg))
+            self._check()
+            self._draft = {"key": key, "m": m, "found": found}
+        from .render import render_cut
+        P(0.92, "Çiziliyor")
+        jpg = png_bytes(render_cut(m, 1000), "JPEG", 90)
+        self._check()
+        w_mm, h_mm = m.size_mm
+        self.cb["draft"](gen, {**new, "jpg": jpg, "size_mm": [round(w_mm, 1), round(h_mm, 1)], "tiles": int(m.n_tiles),
+                               "parca": piece_info(m)})
+        e = estimates(m).get(m.settings.mode) or {}
+        self._check()
+        self.cb["draft"](gen, {"tahmin": {k: e.get(k) for k in ("tabla", "saat", "gram")}})
 
     def _do_plates(self, gen: int, m) -> None:
         from .export.api import plates_glb
@@ -740,7 +891,7 @@ class Engine:
             if m is None:
                 img = self._image_cache.get("img")
                 if img is None:
-                    img = load_image(rr.image_path, s)
+                    img = load_image(rr.source(), s)
                 if full is None and sade.tonal(rr.colours):
                     full = sade.label(img, rr.colours, rr.width_mm)
                 m = thumb_mosaic(img, rr, s, next(iter(self._zones.values()), None), full, self._check)
@@ -755,7 +906,7 @@ class Engine:
     def _do_detect(self, gen: int, r: Recipe) -> None:
         f = {**FINE_DEFAULTS, **(r.fine or {})}
         self.cb["palette"](gen, *analyse(r.image_path, r.width_mm, f.get("tram", "auto"), f.get("renk_sayisi"),
-                                         f.get("tur", "auto")))
+                                         f.get("tur", "auto"), r.frame))
 
 
 # ------------------------------------------------------------------ child processes

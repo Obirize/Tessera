@@ -1,5 +1,7 @@
 // Tessera v2 interface: four questions, one stage, one button.
 import { Stage } from './stage.js';
+import { makePrep } from './prep.js';
+import { pieceControl, plateOffer } from './pieces.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -42,7 +44,7 @@ function render() {
   $('#src-name').textContent = S.image.name;
   const win = $('#in-width');
   if (document.activeElement !== win) win.value = fmt0.format(S.width_cm).replace(/\./g, '');
-  $('#btn-example').style.display = S.example ? '' : 'none';
+  renderTemplates();
   $('#btn-save').disabled = !S.image.path;
   renderFit();
   // 2
@@ -70,6 +72,7 @@ function render() {
     if (!url) { img.classList.remove('ok'); img.removeAttribute('src'); }
     b.querySelector('em').textContent = url || !S.image.path ? '' : '···';
   }
+  renderPieces();
   // 4
   for (const m of $$('.mode')) m.classList.toggle('on', m.dataset.mode === S.mode);
   // fine
@@ -94,13 +97,14 @@ function renderNumbers() {
     ? `${a.panel} panel · ~${fmt0.format(a.purge_gram)} g atık · ~${fmt0.format(a.saat)} saat` + ((S.palette || []).length > 4 ? ` · ${S.palette.length} renk: ${Math.ceil(S.palette.length / 4)} AMS gerekir` : '') : '';
 }
 
+const weight = (g) => (g < 950 ? `${fmt0.format(g)} g` : `${fmt1.format(g / 1000)} kg`);
 function summaryLine() {
   if (!built || !S) return '';
   const e = built.estimates[S.mode] || {};
   const [w, h] = built.size_mm;
   const stones = (built.estimates.parca || {}).parca || built.tiles || 0;
   const parts = S.mode === 'ams' ? `${fmt0.format(stones)} taş, ${e.panel} panel` : `${fmt0.format(stones)} taş`;
-  return `${fmt0.format(w / 10)} × ${fmt0.format(h / 10)} cm · ${parts} · ${e.tabla} tabla · ~${fmt0.format(e.saat || 0)} saat · ${fmt1.format((e.gram || 0) / 1000)} kg`;
+  return `${fmt0.format(w / 10)} × ${fmt0.format(h / 10)} cm · ${parts} · ${e.tabla} tabla · ~${fmt0.format(e.saat || 0)} saat · ${weight(e.gram || 0)}`;
 }
 
 function renderLabel() {
@@ -120,6 +124,7 @@ function renderFine() {
   segOn('#f-tabla', f.tabla_sirasi);
   segOn('#f-tram', String(f.tram));
   colourSeg('#f-taban', 'taban', 'Kendisi seçsin');
+  colourSeg('#f-tek_taban', 'tek_taban', 'Yok');
 }
 function fineLabel(k, v) {
   v = parseFloat(v);
@@ -167,6 +172,22 @@ function sheet(sel) {
 }
 
 // ------------------------------------------------------------------ colours of the picture
+// ready-made pictures
+function renderTemplates() {
+  const t = S.templates || [], g = $('#tpls-g');
+  $('#tpls').classList.toggle('none', !t.length);
+  $('#btn-tpl').style.display = t.length ? '' : 'none';
+  if (g.children.length === t.length) return;
+  g.innerHTML = '';
+  for (const x of t) {
+    const b = document.createElement('button');
+    b.className = 'tpl';
+    b.innerHTML = `<img alt="" src="${esc(x.url)}"><span>${esc(x.name)}</span>`;
+    b.onclick = () => { body.classList.remove('tpls-open'); py.openImage(x.path); };
+    g.appendChild(b);
+  }
+}
+
 // what the program thinks of this picture, and the way out when it is wrong
 function renderFit() {
   const u = S.uygun || {}, f = $('#fit');
@@ -229,6 +250,18 @@ function renderPop() {
   $('#pop-c').onchange = (e) => py.setColour(i, e.target.value);
 }
 
+// ------------------------------------------------------------------ how many stones
+const pieces = () => (built && built.parca && built.parca.alan ? built.parca : null);
+const piece = pieceControl({ box: $('#piece'), seg: $('#pc-mode'), num: $('#in-pc'), range: $('#pc-r'), note: $('#pc-s') },
+  () => ({ want: S && S.fine.parca, p: pieces(), size: built && built.size_mm }), (v) => { if (S && S.image.path) fine({ parca: v }); });
+function renderPieces() {
+  piece(body.classList.contains('is-converting'));
+  $('#mode-s').textContent = 'Her taş ayrı ve tek renk. Baskıda renk hiç değişmez; '
+    + (S.fine.tek_taban ? 'taşlar tabandaki yuvalarına oturur.' : 'taşları kâğıt şablona göre dizersin.');
+  plateOffer({ box: $('#pc-base'), text: $('#pc-base-t'), check: $('#in-base') }, S.fine.tek_taban, pieces(), S.hexes,
+    (v) => fine({ tek_taban: v }));
+}
+
 // ------------------------------------------------------------------ views
 function setView(v) {
   view = v;
@@ -266,7 +299,7 @@ function renderPlateNav() {
   const t = $('#pl-t');
   if (plateIdx == null) {
     const g = ps.reduce((a, p) => a + (p.grams || 0), 0), h = ps.reduce((a, p) => a + (p.hours || 0), 0);
-    t.innerHTML = `<b>${ps.length} tabla</b>~${fmt0.format(h)} saat · ${fmt1.format(g / 1000)} kg`;
+    t.innerHTML = `<b>${ps.length} tabla</b>~${fmt0.format(h)} saat · ${weight(g)}`;
   } else {
     const p = ps[plateIdx];
     const dot = p.hex ? `<i style="background:${p.hex}"></i>` : '';
@@ -305,7 +338,7 @@ function converting(p) {
   if (p.msg) $('#conv-msg').textContent = p.msg;
   convTarget = Math.max(p.f, on ? convTarget : 1);
   if (p.f === 0) convTarget = 0;
-  if (!on) { convTarget = 1; convShown = 1; paintConv(); clearInterval(convTimer); convTimer = null; return; }
+  if (!on) { convTarget = 1; convShown = 1; paintConv(); clearInterval(convTimer); convTimer = null; if (S) renderPieces(); return; }
   convShown = Math.max(convShown, convTarget);
   paintConv();
   if (!convTimer) convTimer = setInterval(() => {
@@ -332,10 +365,11 @@ function toast(msg, err = false) {
 }
 
 function bindUi() {
-  $('#btn-pick').onclick = () => py.openImage('');
-  $('#btn-change').onclick = () => py.openImage('');
-  $('#src-thumb').onclick = () => py.openImage('');
-  $('#btn-example').onclick = () => S && S.example && py.openImage(S.example);
+  $('#btn-pick').onclick = () => prep.start();
+  $('#btn-change').onclick = () => prep.start();
+  $('#btn-edit').onclick = () => prep.edit();
+  $('#src-thumb').onclick = () => prep.edit();
+  $('#btn-tpl').onclick = () => body.classList.toggle('tpls-open');
   $('#btn-open').onclick = () => py.open('');
   $('#btn-save').onclick = () => py.save('');
   const w = $('#in-width');
@@ -362,6 +396,7 @@ function bindUi() {
   $('#btn-done-close').onclick = () => body.classList.remove('done-open');
   bindFine();
   window.addEventListener('keydown', (e) => {
+    if (prep.open) { if (e.key === 'Escape') prep.cancel(); return; }
     if (e.ctrlKey && e.key.toLowerCase() === 's') { e.preventDefault(); py.save(''); }
     if (e.ctrlKey && e.key.toLowerCase() === 'o') { e.preventDefault(); py.open(''); }
     if (e.key === 'Escape') { openCol = null; renderColours(); sheet(null); stage.select(null); body.classList.remove('done-open'); }
@@ -370,6 +405,7 @@ function bindUi() {
   });
 }
 
+const prep = makePrep();
 let lastExport = null;
 function connect() {
   py.state.connect((j) => { S = JSON.parse(j); render(); });
@@ -377,7 +413,7 @@ function connect() {
   py.progress.connect((j) => converting(JSON.parse(j)));
   py.built.connect((j) => {
     built = JSON.parse(j);
-    renderNumbers(); renderLabel();
+    renderNumbers(); renderLabel(); if (S) renderPieces();
     if (body.classList.contains('no3d')) loadFlat();
   });
   py.scene.connect(async (j) => {
@@ -471,6 +507,7 @@ bindUi();
 bindBar();
 new QWebChannel(qt.webChannelTransport, async (ch) => {
   py = ch.objects.py;
+  prep.connect(ch.objects.prep);
   connect();
   S = JSON.parse(await call('getState'));
   if (body.classList.contains('no3d')) { loadFlat(); toast('3D görünüm bu bilgisayarda açılamadı; düz önizleme gösteriliyor.', true); }

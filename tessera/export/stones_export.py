@@ -7,6 +7,7 @@ Output:
   02_tablalar/<n>_<renk>_tablalar.3mf          single-colour plates, ordered by template page
   02_tablalar/AMS_paneller.3mf                 AMS: one panel per plate (thin base + stones)
   02_tablalar/0_Kafes_<renk>.3mf               only with backing="kafes"
+  02_tablalar/0_Taban_<renk>.3mf               only with a one-piece base plate
   02_tablalar/onizleme/*.png                   plate maps with stone codes
   03_stl/<panel>/<code>.stl                    fallback
   rapor.txt / rapor.json
@@ -27,11 +28,13 @@ from shapely import affinity
 from ..geometry.layout import FINISH_TR, GeoParams, ascii_name
 from ..geometry.mesh import build_backing, clean_mesh, extrude, french_cleat
 from ..geometry.packing import pack_outlines
+from ..geometry.plate import build_plate
 from ..geometry.stones import StoneLayout, build_stones, side_transform, stone_arrays, stone_solid
 from ..geometry.text import ui_font
 from ..model import Mode, Mosaic
 from .bambu3mf import MAX_PLATES, FilamentSpec, Obj, Volume, write_bambu_3mf
-from .mass import mass_model
+from .mass import mass_model, split_over_plates
+from .project import write_stl
 
 AMS_BASE_T = 0.8          # thin base under the stones in AMS mode
 
@@ -73,12 +76,12 @@ def stone_plate_image(items, rgb, title, plate_mm=256.0, px=900):
 
     def P(x, y):
         return (x * k, head + px - y * k)
-    for g, code in items:
+    for g, code, *own in items:
         for p in getattr(g, "geoms", [g]):
             if p.geom_type == "Polygon" and not p.is_empty:
-                d.polygon([P(x, y) for x, y in p.exterior.coords], fill=tuple(rgb), outline=(120, 120, 120))
+                d.polygon([P(x, y) for x, y in p.exterior.coords], fill=tuple(own[0] if own else rgb), outline=(120, 120, 120))
     f = ui_font(11)
-    for g, code in items:
+    for g, code, *_ in items:
         c = g.representative_point()
         lab = code.split("-")[-1]
         d.text(P(c.x, c.y), lab, font=f, fill=ink, anchor="mm")
@@ -91,6 +94,7 @@ def export_stones(m: Mosaic, out_dir: str, prog, created: list) -> dict:
     mode = s.mode if s.mode in (Mode.PIECES, Mode.AMS) else Mode.PIECES
     pieces = mode == Mode.PIECES
     kafes = pieces and getattr(s, "backing", "yok") == "kafes"
+    taban = pieces and m.plate is not None
     plates_dir = os.path.join(out_dir, "02_tablalar")
     img_dir = os.path.join(plates_dir, "onizleme")
     stl_dir = os.path.join(out_dir, "03_stl")
@@ -132,7 +136,11 @@ def export_stones(m: Mosaic, out_dir: str, prog, created: list) -> dict:
 
     order = getattr(s, "plate_order", "panel")
     plate_of = {}
+    base_tight = 0
     if pieces:
+        if taban:
+            prog(0.64, "Taban hazırlanıyor")
+            base_tight = _base_plates(m, L, s, names, fil, plates_dir, img_dir, stl_dir, files, plates_info, plate_images)
         prog(0.66, "Tablalara diziliyor")
         for ci in range(len(pal)):
             items = [st for st in L.stones if st.colour == ci]
@@ -236,15 +244,13 @@ def export_stones(m: Mosaic, out_dir: str, prog, created: list) -> dict:
     if pieces and not kafes:
         mm_ = mass_model(m, mode, len(plates_info))      # now the plates are counted, not guessed
     # split model totals over plates
-    totv = sum(p["_vol"] for p in plates_info) or 1.0
-    for p in plates_info:
-        p["gram"] = round(mm_["grams"] * p["_vol"] / totv)
-        p["saat"] = round(mm_["hours"] * p["_vol"] / totv, 1)
+    shares = split_over_plates(mm_, [p["_vol"] for p in plates_info], [p["tur"] == "taban" for p in plates_info])
+    for p, (g, hh) in zip(plates_info, shares):
+        p["gram"], p["saat"] = round(g), round(hh, 1)
         p.pop("_vol", None)
 
     # --- STL fallback ---------------------------------------------------------------------
     prog(0.86, "Yedek STL dosyaları yazılıyor")
-    from .project import write_stl
     for st in L.stones:
         v, t, _, _ = meshes[st.index]
         write_stl(os.path.join(stl_dir, f"P{st.panel + 1}", f"{st.code}.stl"), v, t)
@@ -257,6 +263,8 @@ def export_stones(m: Mosaic, out_dir: str, prog, created: list) -> dict:
     prog(0.95, "Montaj kılavuzu çiziliyor")
     from .guide import write_guide_stones
     files.extend(write_guide_stones(L, out_dir, mode, plates_info))
+    if base_tight:
+        warnings.append(f"{base_tight} taban parçasının modeli tam kapalı değil (Bambu Studio onarır)")
     if not_tight:
         warnings.append(f"{not_tight} taşın STL'i tam kapalı değil (Bambu Studio onarır)")
     n_eng = sum(1 for v in meshes.values() if v[3])
@@ -268,10 +276,11 @@ def export_stones(m: Mosaic, out_dir: str, prog, created: list) -> dict:
         "renk_bolgesi": len(L.stones), "hassas_parca": 0, "panels": len(L.panels), "panel_xy": list(L.grid),
         "grams": round(mm_["grams"]), "hours": round(mm_["hours"], 1), "kg_m2": round(mm_["kg_m2"], 2),
         "parca_gram": round(mm_["parts_g"]), "kafes_gram": round(mm_["backing_g"]), "warnings": warnings,
-        "renk_gram": {pal[i].name: round(g) for i, g in enumerate(mm_["colour_g"])},
+        "renk_gram": {pal[i].name: round(g + (mm_["backing_g"] if taban and i == m.plate_colour else 0))
+                      for i, g in enumerate(mm_["colour_g"])},
         "renk_parca": {f.name: sum(1 for st in L.stones if st.colour == i) for i, f in enumerate(pal)},
         "kafes_renk": pal[L.backing_colour].name if kafes else None,
-        "taban_renk": pal[L.base_colour].name if not pieces else None,
+        "taban_renk": pal[L.base_colour].name if not pieces else pal[m.plate_colour].name if taban else None,
         "numarasiz_parca": sum(1 for v in meshes.values() if not v[3]) if pieces else 0,
         "kodlu_tas": n_eng, "yan_basilan": sum(1 for st in L.stones if st.side and pieces),
         "purge": ({"degisim": mm_["swaps"], "purge_gram": round(mm_["purge_g"]),
@@ -297,6 +306,41 @@ def _pages(pages, L):
 def _vol(v, t):
     a, b, c = v[t[:, 0]], v[t[:, 1]], v[t[:, 2]]
     return float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6.0)
+
+
+def _base_plates(m, L, s, names, fil, plates_dir, img_dir, stl_dir, files, plates_info, plate_images) -> int:
+    """The one-piece base plate, one panel per build plate. Returns how many are not watertight."""
+    ci = m.plate_colour
+    f = s.palette[ci]
+    objs, title, bad = [], [], 0
+    fname = f"0_Taban_{names[ci]}"
+    n_files = max(1, math.ceil(len(L.panels) / MAX_PLATES))
+    for k, pn in enumerate(L.panels):
+        v, t, ok = clean_mesh(build_plate(L, pn, numbers=True))
+        bad += not ok
+        x0, y0, x1, y1 = pn.bounds
+        dx, dy = (s.plate_mm - x1 - x0) / 2, (s.plate_mm - y1 - y0) / 2
+        nm = f"Taban {pn.name}"
+        objs.append(Obj(nm, [Volume(nm, v + (dx, dy, 0.0), t, 1)], k % MAX_PLATES))
+        title.append(nm)
+        write_stl(os.path.join(stl_dir, f"taban_{pn.name}.stl"), v, t)
+        img = os.path.join(img_dir, f"{fname}_{pn.name}.png")
+        here = [st for st in L.stones if pn.region.intersects(st.poly)]
+        items = [(pn.region, "", f.rgb)] + [(st.poly.intersection(pn.region), f"{st.number}" if st.panel == pn.index else "",
+                                             (236, 232, 224)) for st in here]
+        stone_plate_image([(affinity.translate(g, dx, dy), c, rgb) for g, c, rgb in items], (255, 255, 255), nm,
+                          s.plate_mm).save(img, optimize=True)
+        plate_images.append(img)
+        plates_info.append({"dosya": f"{fname}{f'_{k // MAX_PLATES + 1}' if n_files > 1 else ''}.3mf", "renk": f.name,
+                            "tabla": k % MAX_PLATES + 1, "parca": 1, "tur": "taban", "panel": [pn.name],
+                            "_vol": abs(_vol(v, t)), "gorsel": img})
+    for i in range(n_files):
+        lo, hi = i * MAX_PLATES, min(len(objs), (i + 1) * MAX_PLATES)
+        path = os.path.join(plates_dir, f"{fname}{f'_{i + 1}' if n_files > 1 else ''}.3mf")
+        write_bambu_3mf(path, objs[lo:hi], hi - lo, [fil[ci]], plate_names=title[lo:hi], prime_tower=False,
+                        title="Tessera taban")
+        files.append(path)
+    return bad
 
 
 def _kafes_plates(m, L, s, gp, pal, names, fil, plates_dir, img_dir, files, plates_info, plate_images):

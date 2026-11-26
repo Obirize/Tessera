@@ -16,26 +16,13 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage as ndi
 
+from ..renkler import MAIN, TONES  # noqa: F401 (kept outside the pipeline: the window needs them at start)
 from .palette import hex_rgb, rgb_to_lab
 
 W_L, W_LOCAL, W_C = 0.55, 0.6, 1.7      # weights: lightness, local contrast, hue
 JOIN = 15.0                             # colours nearer than this are one colour
 MAX_N = 8
 WORK = 900                              # px, picture size used for finding the colours
-
-
-# the main colours the program speaks in
-MAIN = [("Siyah", "#1B1B1D"), ("Koyu gri", "#4A4B4D"), ("Gri", "#8E9092"), ("Açık gri", "#C6C7C6"),
-        ("Beyaz", "#F3F1EC"), ("Krem", "#EBDDBE"), ("Bej", "#CDB48C"), ("Açık kahve", "#A9794F"),
-        ("Kahverengi", "#774B2B"), ("Bordo", "#6D1A26"), ("Kırmızı", "#C5221F"), ("Turuncu", "#E0701E"),
-        ("Altın", "#D09A35"), ("Sarı", "#F0C419"), ("Açık yeşil", "#9CC24F"), ("Yeşil", "#2F8A43"),
-        ("Koyu yeşil", "#1D4A33"), ("Turkuaz", "#0D8F97"), ("Açık mavi", "#74B5DC"), ("Mavi", "#1F62B5"),
-        ("Lacivert", "#1D2B57"), ("Mor", "#6A3A8C"), ("Pembe", "#E58AA0")]
-
-
-# tones between the main colours: a face or a dark painting cannot do without them (see sade.py)
-TONES = MAIN + [("Ten rengi", "#E3B892"), ("Koyu kahve", "#3A281D"), ("Kiremit", "#A34A32"),
-                ("Zeytin yeşili", "#6C6A3B"), ("Duman mavisi", "#6C8AA5")]
 
 
 def paint_lab(paints: list) -> np.ndarray:

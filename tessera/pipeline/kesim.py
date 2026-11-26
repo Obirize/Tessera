@@ -57,8 +57,9 @@ def image_colours(img: np.ndarray, pal: np.ndarray):
     return found, to
 
 
-def drop_specks(lab: np.ndarray, n: int, min_px: float) -> np.ndarray:
-    """Areas under min_px take the colour that surrounds them most."""
+def drop_specks(lab: np.ndarray, n: int, min_px: float, out: int = -1) -> np.ndarray:
+    """Areas under min_px take the colour that surrounds them most. out: label of what lies outside the
+    artwork; nothing is given to it, only a speck with no other neighbour leaves."""
     H, W = lab.shape
     for c in range(n):
         cc, k = ndi.label(lab == c)
@@ -71,10 +72,54 @@ def drop_specks(lab: np.ndarray, n: int, min_px: float) -> np.ndarray:
             y0, y1 = max(0, sl[0].start - 1), min(H, sl[0].stop + 1)
             x0, x1 = max(0, sl[1].start - 1), min(W, sl[1].stop + 1)
             m = cc[y0:y1, x0:x1] == i
-            ring = ndi.binary_dilation(m) & ~m
             v = lab[y0:y1, x0:x1]
+            ring = ndi.binary_dilation(m) & ~m & (v != out)
             if ring.any():
                 v[m] = np.bincount(v[ring]).argmax()
+            elif out >= 0:
+                v[m] = out
+    return lab
+
+
+def cut_slivers(lab, before, n, res, w_mm=2.0):
+    """Thin strips the outer cut leaves of something wide join the neighbouring colour; lines that were thin
+    anyway stay. lab: n marks the outside; before: the same map uncut."""
+    inside = lab != n
+    r = w_mm / 2 / res
+    q = int(r) + 2
+
+    def wide(M):
+        core = ndi.distance_transform_edt(np.pad(M, q)) > r
+        return (ndi.distance_transform_edt(~core) <= r + 1.5)[q:-q, q:-q]
+    near = ndi.distance_transform_edt(inside) * res < w_mm * 2
+    rim = ndi.binary_dilation(~inside, iterations=2)
+    bad = np.zeros(lab.shape, bool)
+
+    def thin_of(c):
+        out = np.zeros(lab.shape, bool)
+        cc, k = ndi.label(ndi.binary_dilation((lab == c) & near, iterations=3))      # only where it meets the rim
+        for i, sl in enumerate(ndi.find_objects(cc), 1):
+            t = cc[sl] == i
+            if (rim[sl] & t).any():
+                g = tuple(slice(max(0, s.start - 3 * q), s.stop + 3 * q) for s in sl)
+                tg = np.zeros(lab[g].shape, bool)
+                tg[tuple(slice(a.start - b.start, a.stop - b.start) for a, b in zip(sl, g))] = t
+                M = lab[g] == c
+                out[g] |= tg & M & near[g] & ~wide(M) & wide(before[g] == c)
+        return out
+    with ThreadPoolExecutor(6) as ex:
+        thins = list(ex.map(thin_of, range(n)))
+    for thin in thins:
+        cc, k = ndi.label(thin)
+        if k:
+            ok = np.zeros(k + 1, bool)
+            ok[np.unique(cc[rim & thin])] = True       # only strips that lie along the outline
+            ok[0] = False
+            bad |= ok[cc]
+    good = inside & ~bad
+    if bad.any() and good.any():
+        i = ndi.distance_transform_edt(~good, return_distances=False, return_indices=True)
+        lab = np.where(bad, lab[i[0], i[1]], lab)
     return lab
 
 
@@ -384,11 +429,14 @@ def _areas(img, width_mm, size, colours, to, lum, zoom, labels) -> np.ndarray:
 
 def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik", zone=None, centre=None,
           gap=0.4, size=1.0, seed=7, ams=False, report=None, colours=None, to=None, zoom=1.0,
-          labels=None) -> dict:
+          labels=None, pieces=None, base=None, shape=None) -> dict:
     """img: source picture (uint8, any resolution). zone/centre: Vocab map (any resolution) and ray
     centre as 0..1 fractions. colours/to: the picture's colours (renk.find) and the palette index of
     each; found here when missing. zoom: > 1 when img is only a part of the picture. labels: index map
-    into colours when it is already known."""
+    into colours when it is already known. pieces: how many stones the picture should have ("sekil": every shape
+    one stone, None: the texture decides). base: palette colour that makes no stones; it becomes the one plate
+    the stones sit in. shape: outline of the artwork (polygon, mm, y down), None = the whole rectangle."""
+    from . import parca
     report = report or (lambda f, m: None)
     rng = np.random.default_rng(seed)
     res = resolution(width_mm)
@@ -405,6 +453,14 @@ def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik",
         own = [c["rgb"] for c, t in zip(colours, to) if t == i]
         lum[i] = np.mean(own or [pal[i]], axis=0) @ np.array([.3, .59, .11])
     lab = _areas(img, width_mm, (W, H), colours, np.asarray(to), lum, zoom, labels)
+    edge = None
+    if shape is not None:                        # what lies outside is label n: no colour, never a stone
+        from .kadraj import mask
+        uncut = lab.copy()
+        lab[~mask(shape, (W, H), res)] = n
+        lab = drop_specks(cut_slivers(lab, uncut, n, res), n, MIN_A / res ** 2, n)
+        edge = shape.buffer(-gap / 2, quad_segs=90)
+        shapely.prepare(edge)
     report(0.25, "Taşlar kesiliyor")
 
     z = np.zeros((H, W), np.int8)
@@ -414,16 +470,24 @@ def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik",
     ray = (z == int(Vocab.RAYS)) if c_px is not None else np.zeros((H, W), bool)
 
     full = lab
-    if ams:                                      # isolated small shapes are printed into the stones
-        lab = drop_specks(lab.copy(), n, FEATURE_A / res ** 2)
+    if ams and not pieces:
+        base = None                              # printed together anyway: the lines stay stones,
+        # and isolated small shapes are printed into the stones
+        lab = drop_specks(lab.copy(), n, FEATURE_A / res ** 2, n if edge is not None else -1)
 
     jobs = []
     for c in range(n):
         cc, k = ndi.label(lab == c)
         for i, sl in enumerate(ndi.find_objects(cc), 1):
             jobs.append((c, sl, cc[sl] == i, int(rng.integers(1 << 31))))
+    more = {"areas": sum(j[0] != base for j in jobs), "contour": parca.contour(full, n)}
 
     def work(job):
+        if job[0] == base:
+            return np.where(job[2], 0, -1).astype(np.int32), 1
+        return divide(job)
+
+    def divide(job):
         _, sl, m, sd = job
         r = np.random.default_rng(sd)
         area = int(m.sum()) * res ** 2
@@ -459,6 +523,17 @@ def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik",
             return np.where(m, up, -1), q
         return lay_rows(m, s0, res, r)
 
+    if pieces:
+        lines = None
+        if ams and base is not None:             # the base colour is printed with the panel, not assembled
+            lines, k = np.full((H, W), -1, np.int32), 0
+            for c, sl, m, sd in jobs:
+                if c == base:
+                    o, q = divide((c, sl, m, sd))
+                    lines[sl][m] = o[m] + k
+                    k += q
+        return _counted(lab, z, n, res, pal, colours, pieces, base, lines, layout, gap, seed, report, edge) | more
+
     L = np.full((H, W), -1, np.int32)
     nxt = done = 0
     total = sum(j[2].size for j in jobs) or 1
@@ -468,14 +543,18 @@ def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik",
             nxt += q
             done += m.size
             report(0.25 + 0.40 * done / total, "Taşlar kesiliyor")
+    outside = lab == n
+    L[outside] = nxt
     L = _merge_small(_split_components(L), lab, 14.0 / res ** 2)
+    out = np.zeros(int(L.max()) + 1, bool)       # labels that lie outside the artwork
+    out[np.unique(L[outside])] = True
     report(0.72, "Taşların kenarı çiziliyor")
 
     # the joint around a small feature is taken from its big neighbour, so features keep their width
     sz = np.bincount(L.ravel()) * res ** 2
-    small = (sz < 60)[L]
+    small = ((sz < 60) & ~out)[L]
     if small.any():
-        near = (ndi.maximum_filter(small.view(np.uint8), size=3) > 0) & ~small
+        near = (ndi.maximum_filter(small.view(np.uint8), size=3) > 0) & ~small & ~outside
         ys, xs = np.nonzero(near)
         Lg = L.copy()
         for oy, ox in ((0, 1), (0, -1), (1, 0), (-1, 0)):
@@ -487,18 +566,22 @@ def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik",
     polys, pcol, pstone, pzone = [], [], [], []
     objs = ndi.find_objects(L + 1)
     for i, sl in enumerate(objs):
-        if sl is None:
+        if sl is None or out[i]:
             continue
         m = L[sl] == i
         oy, ox = sl[0].start, sl[1].start
+        if base is not None and np.bincount(full[sl][m], minlength=n)[:n].argmax() == base:
+            continue
         P = outline(m, oy, ox, res)
         if P is None:
             continue
         S = shapely.simplify(P.buffer(-gap / 2, quad_segs=3), 0.05)
         if S.is_empty:
             S = P.buffer(-gap / 5, quad_segs=3)
+        if edge is not None and not edge.covers(S):
+            S = S.intersection(edge)             # the exact curve instead of the pixel one
         zz = int(np.bincount(z[sl][m].clip(0)).argmax())
-        cols = np.bincount(full[sl][m], minlength=n)
+        cols = np.bincount(full[sl][m], minlength=n)[:n]
         if ams and (cols * res ** 2 > 2.0).sum() > 1:
             main = int(cols.argmax())
             rest = S
@@ -523,4 +606,33 @@ def build(img: np.ndarray, width_mm: float, pal: np.ndarray, *, layout="mozaik",
             report(0.72 + 0.26 * i / len(objs), "Taşların kenarı çiziliyor")
     report(1.0, "Taşlar hazır")
     return {"polys": polys, "colour": np.array(pcol), "stone": np.array(pstone), "zone": np.array(pzone),
-            "label": L, "lab": full, "res": res, "size": (W * res, H * res)}
+            "label": L, "lab": full, "res": res, "size": (W * res, H * res)} | more
+
+
+def _counted(lab, z, n, res, pal, colours, pieces, base, lines, layout, gap, seed, report, edge) -> dict:
+    """Exactly as many stones as asked for (the same result as build's). lines: stones the base colour is made
+    of all the same; they come on top of the number asked for."""
+    from . import parca, sade
+    from .palette import rgb_to_lab
+    r = parca.make(lab, n, rgb_to_lab(np.asarray(pal, np.uint8)), res,
+                   None if pieces == "sekil" else int(pieces), base=base, layout=layout,
+                   tonal=sade.tonal(colours), gap=gap, seed=seed, edge=edge,
+                   report=lambda f, m: report(0.25 + 0.74 * f, m))
+    S, polys, pc, ps = r["label"], r["polys"], r["colour"], r["stone"]
+    k = int(S.max()) + 1
+    if lines is not None:
+        more = np.where(S < 0, lines, -1)
+        q, c, i = parca.outlines(more, np.zeros(S.shape, np.int8), [base], res, gap, edge)
+        S = np.where(more >= 0, more + k, S)
+        polys, pc, ps = polys + q, np.r_[pc, c], np.r_[ps, i + k]
+        k = int(S.max()) + 1
+    inside = S >= 0
+    zc = np.bincount(S[inside].astype(np.int64) * 64 + z[inside].clip(0), minlength=k * 64).reshape(k, 64).argmax(1)
+    H, W = lab.shape
+    report(1.0, "Taşlar hazır")
+    return {"polys": polys, "colour": pc, "stone": np.arange(len(polys)), "zone": zc[ps],
+            "label": S, "lab": r["lab"], "res": res, "size": (W * res, H * res)}
+
+
+def count_areas(lab, n, base=None) -> int:
+    return sum(ndi.label(lab == c)[1] for c in range(n) if c != base)

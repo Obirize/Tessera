@@ -102,17 +102,20 @@ def write_report_stones(L, out_dir: str, res: dict) -> list[str]:
              f"Boyut: {w / 10:.1f} × {h / 10:.1f} cm   Taş stili: {getattr(s, 'style', 'klasik')}   Mod: "
              + ("Tek renk tablalar · AMS gerekmez" if pieces else "Çok renkli paneller · AMS gerekir"),
              f"Taş: {res['tas']} ayrı taş (aralarında {s.gap_mm:.1f} mm boşluk)"
-             + ("" if pieces else f", {res['panels']} çok renkli panel"),
+             + (f", {res['panels']} parça {res['taban_renk']} taban" if pieces and res.get("taban_renk") else
+                "" if pieces else f", {res['panels']} çok renkli panel"),
              f"Ağırlık: ~{res['kg_m2']} kg/m², toplam ~{res['grams']} g, ~{res['hours']} saat baskı",
              f"Şablon: 1:1, {res['sablon_sayfa'][0]} × {res['sablon_sayfa'][1]} A4 sayfa (A3 dosyası da var)", ""]
     lines.append("Renk başına:")
     for f in s.palette:
-        lines.append(f"  {f.name:<14} {res['renk_parca'].get(f.name, 0):>5} taş   ~{res['renk_gram'].get(f.name, 0):>5} g")
+        lines.append(f"  {f.name:<14} {res['renk_parca'].get(f.name, 0):>5} taş   ~{res['renk_gram'].get(f.name, 0):>5} g"
+                     + ("  (taban)" if pieces and f.name == res.get("taban_renk") else ""))
     lines.append("")
     lines.append(f"Tablalar: {len(res['plates'])}")
     by = defaultdict(lambda: [0, 0, 0.0])
     for p in res["plates"]:
-        key = p["renk"] if p.get("tur") == "parca" else ("Kafes" if p.get("tur") == "kafes" else p["renk"])
+        key = p["renk"] if p.get("tur") == "parca" else ("Kafes" if p.get("tur") == "kafes" else
+                                                        f"Taban ({p['renk']})" if p.get("tur") == "taban" else p["renk"])
         by[key][0] += 1
         by[key][1] += p["gram"]
         by[key][2] += p["saat"]

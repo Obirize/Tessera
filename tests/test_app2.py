@@ -141,6 +141,44 @@ def test_advice_is_shown_and_the_kind_can_be_switched(qapp, bridge, tmp_path):
     assert 'id="fit"' in html
 
 
+def test_templates_are_offered_and_open(qapp, bridge):
+    st = json.loads(bridge.getState())
+    assert [t["name"] for t in st["templates"]] == ["Tessera kedisi", "Örnek afiş"] and "example" not in st
+    for t in st["templates"]:
+        assert bridge.blobs.get(t["url"].split("/data/")[1])                 # the little picture is really served
+    cols, adv = E.analyse(st["templates"][0]["path"], 300)
+    assert {c["ad"] for c in cols} == {"Siyah", "Beyaz", "Kırmızı", "Pembe", "Mavi", "Altın"} and adv["puan"] == "iyi"
+    rec = Rec(bridge)
+    bridge.openImage(st["templates"][0]["path"])
+    assert bridge.display_name() == "Tessera kedisi" and not rec.got["failed"]
+    html = open(os.path.join(app2.WEB_DIR, "index.html"), encoding="utf-8").read()
+    assert "Hazır şablonlar" in html and "btn-example" not in html
+    assert bridge.recipe.fine["parca"] == "sekil" and bridge.recipe.fine["tek_taban"] == E.main_hex("Siyah")
+    assert bridge.recipe.width_mm == 200
+    assert spin(qapp, lambda: rec.got["built"]) and json.loads(rec.got["built"][-1])["tiles"] == 36
+    bridge.setWidth(30)
+    bridge.openImage(st["templates"][1]["path"])                 # the next picture starts without them
+    assert bridge.recipe.fine["parca"] is None and bridge.recipe.fine["tek_taban"] is None and bridge.recipe.width_mm == 300
+
+
+def test_piece_count_and_plate_belong_to_the_project(qapp, bridge, tmp_path):
+    rec = Rec(bridge)
+    bridge.openImage(app2.TEMPLATES[0][1])
+    assert spin(qapp, lambda: rec.got["built"])
+    bridge.setFine(json.dumps({"parca": 50.0}))
+    assert bridge.recipe.fine["parca"] == 50
+    i = [c["ad"] for c in bridge.recipe.colours].index("Siyah")
+    bridge.setColour(i, "Lacivert")
+    assert bridge.recipe.fine["tek_taban"] == E.main_hex("Lacivert")        # the plate goes with its colour
+    bridge.resetFine()
+    assert bridge.recipe.fine["parca"] == 50 and bridge.recipe.fine["tek_taban"] == E.main_hex("Lacivert")
+    p = bridge.save(str(tmp_path / "a.tessera"))
+    bridge.setFine(json.dumps({"parca": None, "tek_taban": None}))
+    assert bridge.open(p) and bridge.recipe.fine["parca"] == 50 and bridge.recipe.fine["tek_taban"] == E.main_hex("Lacivert")
+    n = len(rec.got["built"])
+    assert spin(qapp, lambda: len(rec.got["built"]) > n and json.loads(rec.got["built"][-1])["tiles"] == 50)
+
+
 def test_one_preview_and_the_plates():
     html = open(os.path.join(app2.WEB_DIR, "index.html"), encoding="utf-8").read()
     import re
@@ -337,7 +375,7 @@ def test_offscreen_smoke(qapp, store, monkeypatch):
 
         def probe():
             win.js("JSON.stringify({ready: !!(window.tessera && tessera.ready), canvas: !!document.querySelector"
-                   "('#canvas-host canvas'), q: document.querySelectorAll('.q').length, btn: document.querySelector"
+                   "('#canvas-host canvas'), q: document.querySelectorAll('#column .q').length, btn: document.querySelector"
                    "('#btn-export').textContent})", lambda r: out.update(json.loads(r or "{}")))
         t0 = time.time()
         while time.time() - t0 < 30 and not out.get("ready"):
@@ -347,3 +385,15 @@ def test_offscreen_smoke(qapp, store, monkeypatch):
         assert out["q"] == 4 and out["btn"] == "Dışa aktar"
     finally:
         win.close()
+
+
+def test_start_does_not_load_the_mosaic_code():
+    """scipy and shapely take seconds to load from a cold disk; the window must not wait for them."""
+    import subprocess
+    import sys
+    code = ("import sys, tessera.app2 as a, tessera.app2_engine as E; E.main_colours(); E.main_hex('Siyah'); "
+            "print(sorted(m for m in ('scipy', 'shapely', 'tessera.pipeline') if m in sys.modules))")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120,
+                         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "[]"

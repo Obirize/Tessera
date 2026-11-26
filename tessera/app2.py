@@ -32,13 +32,18 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow
 
 from . import app2_engine as E
+from .app2_prep import Prep
 from .model import Mode
 from .project import PROJECT_SUFFIX, Project
 
 SCHEME = b"tessera"
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXAMPLE_IMAGE = os.path.join(ROOT_DIR, "ornekler", "poster", "kaynak.webp")
+TEMPLATES = [                    # ready-made pictures: (name, file, width in mm or None, settings it opens with)
+    ("Tessera kedisi", os.path.join(ROOT_DIR, "ornekler", "sablonlar", "Tessera kedisi.png"), 200.0,
+     {"parca": "sekil", "tek_taban": "Siyah"}),
+    ("Örnek afiş", os.path.join(ROOT_DIR, "ornekler", "poster", "kaynak.webp"), None, {}),
+]
 IMAGE_FILTER = "Görseller (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"
 
 
@@ -214,13 +219,15 @@ class Bridge(QObject):
         self._tmp = tempfile.mkdtemp(prefix="tessera2_")
         self.engine = E.Engine(self._on_built, self._on_scene, self._on_thumb, self._on_palette,
                                self._on_error, self._on_busy, self._on_progress, self._on_plates,
-                               self._on_advice)
+                               self._on_advice, self._on_draft)
+        self.serial = 0                         # blob names that are used once
         self._scene_cache: dict = {}            # recipe key -> (scene_info, plates_info)
         self._conv_gen = -1                     # generation whose conversion is on screen
         self._await_palette: Optional[int] = None
         self._old_paints: list = []             # paints of an older project, waiting for its colours
         self._thumb_gens: dict = {}
         self._sig_internal.connect(self._dispatch, Qt.ConnectionType.QueuedConnection)
+        self.prep = Prep(self)
 
     # -------------------------------------------------- engine callbacks (worker thread)
     _sig_internal = Signal(str, object)
@@ -244,6 +251,12 @@ class Bridge(QObject):
         if path == self.recipe.image_path and abs(width - self.recipe.width_mm) < 0.5:
             self.recipe.uygun = advice
             self._emit_state()
+
+    def _on_draft(self, gen, d):
+        self._sig_internal.emit("draft", (gen, d))
+
+    def _ui_draft(self, gen, d):
+        self.prep.got(gen, d)
 
     def _on_error(self, gen, kind, msg):
         self._sig_internal.emit("error", (gen, kind, msg))
@@ -286,9 +299,14 @@ class Bridge(QObject):
         self.built.emit(json.dumps(info, ensure_ascii=False))
         if not self.thumbs.get("_key") == self._thumb_key():
             self.thumbs = {"_key": self._thumb_key()}
-        if len([k for k in self.thumbs if not k.startswith("_")]) < len(E.STYLE_CARDS):
-            self._thumb_gens[gen] = self.thumbs["_key"]
-            self.engine.thumbs(gen, self.recipe)     # (re)queued: a newer build may have cut it short
+        self.ask_thumbs()
+
+    def ask_thumbs(self) -> None:
+        """(Re)queue the texture pictures: a newer build or a draft may have cut them short."""
+        if self.mosaic is not None and self.thumbs.get("_key") == self._thumb_key() \
+                and len([k for k in self.thumbs if not k.startswith("_")]) < len(E.STYLE_CARDS):
+            self._thumb_gens[self.gen] = self.thumbs["_key"]
+            self.engine.thumbs(self.gen, self.recipe)
 
     def _ui_scene(self, gen, glb, meta):
         """Every stone as its own node (R6). The progress overlay closes when this arrives."""
@@ -329,6 +347,9 @@ class Bridge(QObject):
             self._emit_state()
 
     def _ui_error(self, gen, kind, msg):
+        if kind == "draft":
+            self.prep.failed(gen, msg)
+            return
         if kind == "detect":
             if gen != self._await_palette:
                 return                               # an older picture's search; nobody waits for it
@@ -346,7 +367,7 @@ class Bridge(QObject):
 
     def _thumb_key(self):
         r = self.recipe
-        return (r.image_path, round(r.width_mm), tuple(E.unique_names(r.colours)),
+        return (r.image_path, json.dumps(r.frame), round(r.width_mm), tuple(E.unique_names(r.colours)),
                 json.dumps(r.fine, sort_keys=True, default=str), r.zone_mask is None)
 
     # -------------------------------------------------- state
@@ -355,7 +376,7 @@ class Bridge(QObject):
         img = r.image_path
         return {
             "image": {"path": img, "name": os.path.basename(img) if img else "",
-                      "url": self._image_thumb_url() if img else ""},
+                      "url": self._thumb_url(img, r.frame) if img else ""},
             "name": self.display_name(),
             "width_cm": round(r.width_mm / 10, 1),
             "palette": list(r.palette),
@@ -373,7 +394,7 @@ class Bridge(QObject):
             "fine": {**E.FINE_DEFAULTS, **r.fine},
             "project": self.project_path,
             "dirty": self.dirty,
-            "example": EXAMPLE_IMAGE if os.path.exists(EXAMPLE_IMAGE) else "",
+            "templates": [{"name": n, "path": p, "url": self._thumb_url(p)} for n, p, *_ in TEMPLATES if os.path.exists(p)],
             "has_full": self.plates_info is not None and self.full_gen == self.gen,
         }
 
@@ -386,12 +407,15 @@ class Bridge(QObject):
             return p.display_name()
         return ""
 
-    def _image_thumb_url(self) -> str:
-        key = f"src_{abs(hash(self.recipe.image_path)) % 10**8}.jpg"
+    def _thumb_url(self, path: str, frame: Optional[list] = None) -> str:
+        key = f"src_{abs(hash((path, json.dumps(frame)))) % 10**8}.jpg"
         if self.blobs.get(key) is None:
             try:
-                from .pipeline import open_rgb
-                im = open_rgb(self.recipe.image_path)
+                from .resim import open_rgb
+                if frame:                         # the pipeline loads slowly: only for a cut picture
+                    from .pipeline.kadraj import picture
+                    path = picture(path, *frame)
+                im = open_rgb(path)
                 im.thumbnail((240, 240))
                 self.blobs.put(key, E.png_bytes(np.asarray(im), "JPEG", 85), "image/jpeg", keep=64)
             except Exception:  # noqa: BLE001
@@ -420,33 +444,36 @@ class Bridge(QObject):
     def getState(self) -> str:  # noqa: N802
         return json.dumps(self.state_dict(), ensure_ascii=False)
 
-    @Slot(str, result=str)
-    def openImage(self, path: str = "") -> str:  # noqa: N802
+    def new_recipe(self, path: str = "") -> Optional[E.Recipe]:
+        """A picture's recipe before anything was decided ('' asks for the picture); None when there is none to
+        prepare (cancelled, unreadable, or a project, which is opened)."""
         if not path:
             start = os.path.dirname(self.recipe.image_path) if self.recipe.image_path else \
                 QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
             path, _ = QFileDialog.getOpenFileName(self.window, "Görsel seç", start, IMAGE_FILTER)
             if not path:
-                return ""
+                return None
         path = os.path.abspath(path)
         if path.endswith(PROJECT_SUFFIX):
-            return self.open(path)
+            self.open(path)
+            return None
         if not os.path.exists(path):
             self.failed.emit(json.dumps({"kind": "image", "msg": f"Dosya bulunamadı: {path}"}, ensure_ascii=False))
-            return ""
+            return None
         try:
-            from .pipeline import open_rgb
-            im = open_rgb(path)
-            iw, ih = im.size
+            from .resim import open_rgb
+            open_rgb(path)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(json.dumps({"kind": "image", "msg": E.friendly_error(e)}, ensure_ascii=False))
-            return ""
+            return None
         r = E.Recipe()
         r.width_mm = self.recipe.width_mm         # a width typed before the picture is kept
         r.style, r.mode, r.fine = self.recipe.style, self.recipe.mode, dict(self.recipe.fine)
-        r.fine.pop("taban", None)
-        r.fine["renk_sayisi"] = None
-        r.fine["tur"] = "auto"
+        r.fine.update(taban=None, tek_taban=None, parca=None, renk_sayisi=None, tur="auto")
+        for _, p, width, preset in TEMPLATES:
+            if os.path.normcase(p) == os.path.normcase(path):
+                r.width_mm = width or r.width_mm
+                r.fine.update({k: E.main_hex(v) if k in E.PAINT_SETTINGS else v for k, v in preset.items()})
         r.image_path = path
         z = E.sibling_zones(path)
         if z:
@@ -455,15 +482,36 @@ class Bridge(QObject):
             r.file_default_vocab = int(z.get("varsayilan", 0))
             rc = z.get("isin_merkezi")
             r.rays_center = list(rc) if rc else None
+        return r
+
+    @Slot(str, result=str)
+    def openImage(self, path: str = "") -> str:  # noqa: N802
+        """A picture straight into the project, without the preparation window."""
+        if path.endswith(PROJECT_SUFFIX):
+            return self.open(os.path.abspath(path))
+        r = self.new_recipe(path)
+        if r is None:
+            return ""
+        self.adopt(r, True, True)
+        w, h = E.picture_size(r.image_path)
+        return json.dumps({"w": w, "h": h})
+
+    def adopt(self, r: E.Recipe, new: bool, find: bool) -> None:
+        """This recipe becomes the project. new: it is another picture; find: its colours are not known yet."""
         self.recipe = r
-        self.project_path = ""
+        if new:
+            self.project_path = ""
+            self.last_export = None
         self.thumbs = {}
         self.plates_info = None
         self.scene_info = None
-        self.last_export = None
-        self._find_colours("Görselin renkleri bulunuyor")     # the build starts when they arrive
-        self._changed(rebuild=False)
-        return json.dumps({"w": iw, "h": ih})
+        if find:
+            self._find_colours("Görselin renkleri bulunuyor")     # the build starts when they arrive
+            self._changed(rebuild=False)
+        else:
+            self._await_palette = None
+            self.engine.cancel_detect()
+            self._changed()
 
     def _find_colours(self, msg: str) -> None:
         self.gen += 1
@@ -518,8 +566,9 @@ class Bridge(QObject):
         if c == self.recipe.colours[i]:
             return
         was = self.recipe.colours[i]["hex"].upper()
-        if self.recipe.fine.get("taban") == was and was not in [h for _, h in E.unique_names(cols)]:
-            self.recipe.fine["taban"] = c["hex"].upper()      # the base plate's colour itself was repainted
+        for k in E.PAINT_SETTINGS:
+            if self.recipe.fine.get(k) == was and was not in [h for _, h in E.unique_names(cols)]:
+                self.recipe.fine[k] = c["hex"].upper()        # the base plate's colour itself was repainted
         self.recipe.use_colours(cols)
         self._changed()
 
@@ -562,6 +611,8 @@ class Bridge(QObject):
         tram = self.recipe.fine.get("tram", "auto")
         changed = False
         for k, v in patch.items():
+            if k == "parca":
+                v = E.piece_count(v)
             if k in E.FINE_DEFAULTS and self.recipe.fine.get(k, E.FINE_DEFAULTS[k]) != v:
                 self.recipe.fine[k] = v
                 changed = True
@@ -575,8 +626,8 @@ class Bridge(QObject):
     @Slot()
     def resetFine(self) -> None:  # noqa: N802
         tram = self.recipe.fine.get("tram", "auto")
-        keep = {k: self.recipe.fine.get(k, E.FINE_DEFAULTS[k]) for k in ("renk_sayisi", "tur")}
-        self.recipe.fine = {**E.FINE_DEFAULTS, **keep}   # the colours have their own place and their own reset
+        keep = {k: self.recipe.fine.get(k, E.FINE_DEFAULTS[k]) for k in ("renk_sayisi", "tur", "parca", "tek_taban")}
+        self.recipe.fine = {**E.FINE_DEFAULTS, **keep}   # colours and piece count have their own place
         self._fine_changed(tram)
 
     def _fine_changed(self, tram) -> None:
@@ -740,6 +791,8 @@ class Bridge(QObject):
         r.zone_mask = p.paint_mask
         r.light_az, r.light_el = p.light_az, p.light_el
         r.name = p.name
+        from .pipeline.kadraj import clean_frame, clean_shape
+        r.kadraj, r.sekil = clean_frame(extra.get("kadraj")), clean_shape(extra.get("sekil"))
         self.recipe = r
         self.project_path = os.path.abspath(path)
         self.thumbs = {}
@@ -837,7 +890,7 @@ class DropView(QWebEngineView):
             self.page().runJavaScript("window.tessera && tessera.dragHint(false)")
             if urls:
                 ev.acceptProposedAction()
-                QTimer.singleShot(0, lambda p=urls[0]: self.bridge.openImage(p))
+                QTimer.singleShot(0, lambda p=urls[0]: self.bridge.prep.open(p))
             return True
         return super().eventFilter(obj, ev)
 
@@ -877,6 +930,7 @@ class MainWindow(QMainWindow):
         st.setAttribute(QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, True)
         self.channel = QWebChannel(self.page)
         self.channel.registerObject("py", self.bridge)
+        self.channel.registerObject("prep", self.bridge.prep)
         self.page.setWebChannel(self.channel)
         self.page.setBackgroundColor(QColor("#f3eee5"))
         self.setCentralWidget(self.view)
@@ -995,6 +1049,18 @@ def to_front(win) -> None:
         f(int(win.winId()), ctypes.c_void_p(after), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
 
 
+def warm_up() -> None:
+    """The mosaic code (scipy, shapely) takes a second or more to load. Not at start, where the window
+    would wait for it, but in the background once the window is up, so the first picture opens at once."""
+    def load():
+        try:
+            import importlib
+            importlib.import_module("tessera.pipeline.kadraj")
+        except Exception:  # noqa: BLE001 - the picture loads it again and says what is wrong
+            pass
+    threading.Thread(target=load, name="tessera-warm", daemon=True).start()
+
+
 def main(argv=None, card=None) -> int:
     """``card``: the opening card's handle (tessera.baslat); the window waits until it has finished."""
     argv = list(argv if argv is not None else sys.argv)
@@ -1039,6 +1105,7 @@ def main(argv=None, card=None) -> int:
             lift(0)
         if target:
             QTimer.singleShot(300, open_target)
+        QTimer.singleShot(800, warm_up)
 
     reveal()
     try:

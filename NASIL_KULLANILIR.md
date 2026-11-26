@@ -4,24 +4,34 @@ Masaüstündeki **Tessera** simgesine ya da `Tessera.bat` dosyasına çift tıkl
 
 ## Dört soru
 
-1. **Hangi görsel?** Görseli pencereye sürükle, duvardaki genişliğini cm olarak yaz.
-2. **Hangi renkler?** Kullanacağın makaralara dokun. "Bu görsel için öner" senin yerine seçer.
+1. **Hangi görsel?** Görseli pencereye sürükle ya da hazır şablonlardan birini seç. Önce **Görseli hazırla** penceresi açılır (aşağıda).
+2. **Hangi renkler?** Program görselin renklerini bulur. Değiştirmek istediğine dokun.
 3. **Nasıl bir doku?**
    - **Mozaik:** taş sıraları şekillerin kenarını izler
    - **Kırık taş:** gelişigüzel küçük taşlar, en çok taş
    - **Blok:** tuğla gibi düzgün bloklar
    - **İri parça:** az sayıda büyük parça, en hızlısı
+   - **Parça sayısı:** dokuya göre, her şekil tek taş ya da senin vereceğin sayı
+   - Siyah çizgili görsellerde **tek parça taban** önerilir: çizgiler taş olmaz, taşların oturduğu taban olur
 4. **Nasıl basacaksın?**
    - **Tek renk tablalar:** her taş ayrı ve tek renk, AMS gerekmez
    - **AMS ile çok renkli:** paneller hazır dizilmiş çıkar, küçük detaylar taşın içine işlenir
 
 Sonra **Dışa aktar**.
 
+## Görseli hazırla
+
+- **Kadraj:** kare, dikey, yatay ya da köşelerinden çekerek serbest kırp; döndür, aynala
+- **Şekil:** düz, yuvarlak köşe, daire, oval. Taşlar kenara göre kesilir.
+- **Boyut** ve **parça sayısı**
+- **Taşlar** düğmesi gerçek taşları gösterir. "Ekle" deyene kadar projede hiçbir şey değişmez.
+
+Sonradan değiştirmek için görselin yanındaki **Kırp, şekil ver**.
+
 ## Üst bardaki görünümler
 
-- **Duvarda / Masada:** eseri 3D olarak çevir. "Parçaları ayır" her taşı tek tek ayırır. Bir taşa tıklayınca kodu, boyutu ve tablası çıkar.
+- **Önizleme:** eseri 3D olarak çevir. "Parçaları ayır" her taşı tek tek ayırır. Bir taşa tıklayınca kodu, boyutu ve tablası çıkar.
 - **Tablalar:** baskı tablalarının dizilimi.
-- **Önizleme:** üstten düz görünüm.
 
 ## Gelişmiş ayarlar
 

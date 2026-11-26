@@ -19,6 +19,7 @@ import numpy as np
 from scipy import ndimage as ndi
 
 from ..geometry.layout import GeoParams, backing_colour_index, panel_xy  # noqa: F401
+from ..geometry.plate import panel_count
 from ..model import Mode, Mosaic
 from .mass import mass_model  # noqa: F401
 
@@ -121,14 +122,17 @@ def estimate(m: Mosaic, exact: bool = True) -> dict:
     H, W = m.label.shape
     mm = s.mm_per_px
     nx, ny = panel_xy(W * mm, H * mm, s.panel_max_mm)
+    panels = panel_count(m)
     packed = None
     if exact and mode == Mode.PIECES and m.polys is not None:
         from .scene import stone_plates
         packed = sum(n for *_, n in stone_plates(m))      # the same packing the plates view and the export use
+        if m.plate is not None:
+            packed += panels
     mm_ = mass_model(m, mode, packed)
     hassas = None
     if mode == Mode.AMS:
-        parca = nx * ny          # AMS: each panel is one printed object to assemble
+        parca = panels           # AMS: each panel is one printed object to assemble
     elif not s.merge_same_colour:
         parca = int(mm_.get("stones", m.n_tiles))      # every stone is its own piece (R6-1)
     elif exact:
@@ -143,7 +147,7 @@ def estimate(m: Mosaic, exact: bool = True) -> dict:
         "gram": int(round(mm_["grams"])),
         "saat": round(mm_["hours"], 1),
         "purge_gram": 0 if mode == Mode.PIECES else int(round(mm_["purge_g"])),
-        "panel": int(nx * ny),
+        "panel": int(panels),
         "panel_xy": [nx, ny],
         "kg_m2": round(mm_["kg_m2"], 2),
         "kafes_gram": int(round(mm_["backing_g"])),

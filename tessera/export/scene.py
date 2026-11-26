@@ -24,6 +24,7 @@ from manifold3d import CrossSection, FillRule, Manifold
 from scipy import ndimage as ndi
 
 from ..geometry.layout import GeoParams, backing_colour_index, build_layout, panel_xy
+from ..geometry.plate import FLOOR, build_plate
 from ..model import Mode, Mosaic
 
 SCHEMA = "tessera.scene/1"
@@ -46,11 +47,11 @@ def _key(m: Mosaic, what: str, quality: str = "") -> tuple:
     s = m.settings
     return (what, quality, id(m.label), m.label.shape, int(m.label[::97, ::89].sum()), s.mode,
             s.merge_same_colour, s.panel_max_mm, getattr(s, "backing_colour", None), s.gap_mm,
-            tuple(f.rgb for f in s.palette), getattr(s, "plate_order", "panel"))
+            tuple(f.rgb for f in s.palette), getattr(s, "plate_order", "panel"), m.plate_colour)
 
 
 def _remember(key, value):
-    while len(_CACHE) > 7:                # the oldest goes, not what was made a moment ago for the same piece
+    while len(_CACHE) > 9:                # the oldest goes, not what was made a moment ago for the same piece
         _CACHE.pop(next(iter(_CACHE)))
     _CACHE[key] = value
     return value
@@ -524,7 +525,8 @@ def scene_glb_stones(m: Mosaic, quality: str = "preview", progress=None):
     prog(0.15, "Taş modelleri")
     meshes = _stone_meshes(m, L, quality, prog)
     pieces = L.mode == Mode.PIECES
-    base_t = 0.8 if not pieces else 0.0
+    plates = base_meshes(m, L)
+    base_t = 0.8 if not pieces else FLOOR if plates else 0.0
     mats = [(f"{f.name}", f.rgb) for f in s.palette]
     nodes, metas = [], []
     for st, (V, T) in zip(L.stones, meshes):
@@ -546,6 +548,10 @@ def scene_glb_stones(m: Mosaic, quality: str = "preview", progress=None):
             name = f"backing:{pn.name}"
             nodes.append((name, v, t, len(mats) - 1, None))
             metas.append(_backing_meta(name, pn.name, L.base_colour, s, v))
+    for pn, v, t in plates:
+        name = f"backing:{pn.name}"
+        nodes.append((name, v, t, m.plate_colour, None))
+        metas.append(_backing_meta(name, pn.name, m.plate_colour, s, v))
     prog(0.9, "GLB yazılıyor")
     glb = write_glb(nodes, mats)
     w_mm, h_mm = m.size_mm
@@ -555,10 +561,20 @@ def scene_glb_stones(m: Mosaic, quality: str = "preview", progress=None):
             "palette": _palette_meta(m, L.letters),
             "panels": [{"name": pn.name, "bounds": [round(float(x), 2) for x in pn.bounds]} for pn in L.panels],
             "template_pages": list(L.pages), "nodes": metas,
-            "counts": {"parts": len(L.stones), "backings": 0 if pieces else len(L.panels), "cleats": 0},
+            "counts": {"parts": len(L.stones), "backings": len(plates) if pieces else len(L.panels), "cleats": 0},
             "build_s": round(time.time() - t0, 2)}
     prog(1.0, "Hazır")
     return glb, meta
+
+
+def base_meshes(m: Mosaic, L) -> list:
+    """The one-piece base plate, panel by panel: [(panel, vertices, triangles)]; empty when there is none."""
+    if m.plate is None or L.mode != Mode.PIECES:
+        return []
+    key = _key(m, "base")
+    if key in _CACHE:
+        return _CACHE[key]
+    return _remember(key, [(pn, *_arrays(build_plate(L, pn))) for pn in L.panels])
 
 
 def stone_plates(m: Mosaic) -> list:
@@ -589,7 +605,7 @@ def plates_glb_stones(m: Mosaic, gap_mm: float = 40.0, progress=None):
     """Plates exactly as exported (same footprints, same packing, same order)."""
     from ..geometry.layout import ascii_name
     from ..geometry.stones import side_transform
-    from .mass import mass_model
+    from .mass import mass_model, split_over_plates
     t0 = time.time()
     s = m.settings
     L = _stone_layout(m)
@@ -605,6 +621,11 @@ def plates_glb_stones(m: Mosaic, gap_mm: float = 40.0, progress=None):
                 V = V @ M[:3, :3].T
                 V[:, 2] -= V[:, 2].min()
             printed.append((V, T))
+        for pn, v, t in base_meshes(m, L):
+            x0, y0, x1, y1 = pn.bounds
+            f, ci, name = s.palette[m.plate_colour], m.plate_colour, f"Taban {pn.name}"
+            v = v + ((P - x1 - x0) / 2, (P - y1 - y0) / 2, 0.0)
+            beds.append((name, ci, [(f"backing:{pn.name}", v, t, ci, name)], f"0_Taban_{ascii_name(f.name)}.3mf"))
         for ci, items, pl, n_pl in stone_plates(m):
             f = s.palette[ci]
             content = [[] for _ in range(n_pl)]
@@ -638,18 +659,16 @@ def plates_glb_stones(m: Mosaic, gap_mm: float = 40.0, progress=None):
     bed_t = np.array([[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5],
                       [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]])
     vols = [sum(abs(_signed_volume(v, t)) for _, v, t, *_ in items) for _, _, items, _ in beds]
-    vtot = sum(vols) or 1.0
+    shares = split_over_plates(mmod, vols, [L.mode == Mode.PIECES and items[0][0].startswith("backing:") for _, _, items, _ in beds])
     nodes, pm = [], []
-    for k, ((title, ci, items, fname), vol) in enumerate(zip(beds, vols)):
+    for k, ((title, ci, items, fname), (grams, hours)) in enumerate(zip(beds, shares)):
         ox, oy = (k % cols) * stride, -(k // cols) * stride
         nodes.append((f"bed:{k + 1}", bed_v, bed_t, len(mats) - 1, (ox, oy, 0)))
         for nm, v, t, c, code in items:
             nodes.append((f"{nm}@bed{k + 1}", v, t, c, (ox, oy, 0)))
-        share = vol / vtot
         pm.append({"name": f"bed:{k + 1}", "title": title, "file": fname, "colour": ci,
                    "hex": s.palette[ci].hex if ci is not None else None, "origin_mm": [ox, oy], "size_mm": [P, P],
-                   "codes": [it[4] for it in items], "grams": round(mmod["grams"] * share),
-                   "hours": round(mmod["hours"] * share, 1)})
+                   "codes": [it[4] for it in items], "grams": round(grams), "hours": round(hours, 1)})
     glb = write_glb(nodes, mats)
     return glb, {"schema": SCHEMA, "kind": "plates", "mode": s.mode, "units": "mm", "up": "+z (bed normal)",
                  "plate_mm": P, "grid_columns": cols, "stride_mm": stride, "plates": pm,
