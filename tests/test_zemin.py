@@ -218,6 +218,30 @@ def test_photo_background(photo):
     assert rep["yol"] == "foto" and rep["puan"] in ("iyi", "orta") and "deneme" in rep["soz"][-1]
     assert 0.6 < rep["pay"] < 0.75
     assert at(keep, 0.5, 0.55) and at(keep, 0.5, 0.25) and not at(keep, 0.05, 0.05) and not at(keep, 0.95, 0.5)
+    # the edge lies on the figure's own edge, not a few pixels off
+    from scipy import ndimage as ndi
+    yy, xx = np.mgrid[:600, :500]
+    fig = ((xx - 250) / 140) ** 2 + ((yy - 330) / 210) ** 2 < 1
+    d = ndi.distance_transform_edt(~(fig & ~ndi.binary_erosion(fig)))
+    cut = keep & ~ndi.binary_erosion(keep)
+    assert d[cut].mean() < 2.2 and np.percentile(d[cut], 98) < 5
+
+
+def test_photo_lines_lean():
+    """What lies nearer the green lines (walking over the picture, edges count as a long way) leans to stay."""
+    X = np.zeros((40, 60, 3), np.float32)
+    X[:, 30:] = 50                                   # two flat halves, an edge between them
+    g, r = np.zeros((40, 60), bool), np.zeros((40, 60), bool)
+    g[20, 5], r[20, 55] = True, True
+    lean = Z._lean(X, g, r)
+    assert (lean[:, :28] > 0.5).all() and (lean[:, 32:] < -0.5).all()
+    assert Z._lean(X, g, np.zeros_like(r)) is None
+
+
+def test_photo_red_line_opens_a_hole(photo):
+    """A red line inside the figure: that place goes, even though the figure is all around it."""
+    keep, _ = Z.keep(photo, None, {"cizgiler": [["gitsin", [[0.45, 0.55], [0.55, 0.55]]]]})
+    assert not at(keep, 0.5, 0.55) and at(keep, 0.5, 0.3) and at(keep, 0.5, 0.8) and not at(keep, 0.05, 0.05)
 
 
 def test_photo_lines_steer_the_cut(photo):
