@@ -51,6 +51,47 @@ def test_as_many_stones_as_asked_for(cat, n, base):
     assert all(m.polys[i].intersection(m.polys[j]).area < 0.05 for i, j in zip(a, b))      # no stone lies on another
 
 
+@pytest.mark.parametrize("base", ["Siyah", None])
+def test_few_stones_keep_the_nose(cat, base):
+    m = make(cat, 20, base, width=100.0)
+    names = [m.settings.palette[c].name for c in m.tile_colour]
+    nose = [n for p, n in zip(m.polys, names) if p.contains(shapely.Point(50, 58))]
+    assert nose == ["Pembe"]                                                       # not black
+    assert {"Mavi", "Altın"} <= set(names) and 20 <= m.n_tiles <= 22
+
+
+def test_features_cost_a_few_stones_more_at_most():
+    from tessera.pipeline import kesim, parca
+    from tessera.pipeline.palette import rgb_to_lab
+    lab = np.zeros((200, 200), np.int16)                       # 100 x 100 mm, white with four pink dots
+    for y, x in ((30, 30), (30, 160), (160, 30), (160, 160)):
+        lab[y:y + 10, x:x + 10] = 1
+    plab = rgb_to_lab(np.array([[240, 240, 235], [230, 140, 160]], np.uint8))
+    out, over = parca.reduce(lab, 2, plab, 0.5, 4)
+    assert over == 1 and (out == lab).all()                    # one stone more than asked: every dot stays
+    out, over = parca.reduce(lab, 2, plab, 0.5, 2)
+    assert over == 1 and kesim.count_areas(out, 2) == 3        # asked for far fewer: only one more, two dots go
+
+
+def test_a_big_area_keeps_its_colour_before_a_feature():
+    from tessera.pipeline import kesim, parca
+    from tessera.pipeline.palette import rgb_to_lab
+    lab = np.zeros((200, 200), np.int16)                       # white, a pale square (cheap to lose), black dots
+    lab[120:150, 120:150] = 1
+    for y, x in ((30, 30), (30, 160), (160, 30)):
+        lab[y:y + 10, x:x + 10] = 2
+    plab = rgb_to_lab(np.array([[240, 240, 235], [190, 175, 150], [25, 25, 28]], np.uint8))
+    out, over = parca.reduce(lab, 3, plab, 0.5, 2)
+    assert (out[120:150, 120:150] == 1).all() and over == 1 and kesim.count_areas(out, 3) == 3
+
+
+def test_cat_at_twelve_keeps_its_background_and_ears(cat):
+    m = make(cat, 12, None, width=100.0)
+    names = [m.settings.palette[c].name for c in m.tile_colour]
+    at = lambda x, y: [n for p, n in zip(m.polys, names) if p.contains(shapely.Point(x, y))]
+    assert at(50, 8) == ["Kırmızı"] and at(23, 22) == at(77, 22) == ["Pembe"] and m.n_tiles <= 13
+
+
 def test_texture_decides_when_nothing_is_asked(cat):
     m = make(cat, None, None)
     assert m.plate is None and m.n_tiles > 300 and m.stats["alan"] == 37
