@@ -228,14 +228,39 @@ def test_photo_background(photo):
 
 
 def test_photo_lines_lean():
-    """What lies nearer the green lines (walking over the picture, edges count as a long way) leans to stay."""
+    """What lies nearer the green lines (walking over the picture, edges count as a long way) leans to stay;
+    only near the lines, far away the colours decide alone."""
     X = np.zeros((40, 60, 3), np.float32)
     X[:, 30:] = 50                                   # two flat halves, an edge between them
     g, r = np.zeros((40, 60), bool), np.zeros((40, 60), bool)
     g[20, 5], r[20, 55] = True, True
     lean = Z._lean(X, g, r)
-    assert (lean[:, :28] > 0.5).all() and (lean[:, 32:] < -0.5).all()
+    assert (lean[18:23, 2:9] > 0.3).all() and (lean[18:23, 51:58] < -0.3).all()
+    assert (lean[:, 15:45] == 0).all() and lean[0, 5] == 0
     assert Z._lean(X, g, np.zeros_like(r)) is None
+
+
+def test_photo_far_line_has_no_say():
+    """Few lines: a red line far off on one side, a green one at the bottom. The upper half of the figure,
+    pale and near the ground's colour, is far from both: it stays as it is without lines, not taken away."""
+    from scipy import ndimage as ndi
+    rng = np.random.default_rng(2)
+    h, w = 400, 400
+    g = ndi.gaussian_filter(rng.normal(0, 1, (h, w)), 8)
+    img = np.stack([150 + 30 * g, 140 + 30 * g, 120 + 30 * g], -1)                  # stone-like ground
+    yy, xx = np.mgrid[:h, :w]
+    fig = ((xx - 230) / 120) ** 2 + ((yy - 240) / 150) ** 2 < 1
+    tex = ndi.gaussian_filter(rng.normal(0, 1, (h, w)), 2) * 40
+    low = np.stack([210 + tex, 120 + tex, 50 + tex], -1)                              # orange below
+    high = np.stack([165 + tex, 149 + tex, 120 + tex], -1)                            # pale above
+    img = np.where(fig[..., None], np.where((yy > 260)[..., None], low, high), img)
+    img = (ndi.gaussian_filter(img, (1, 1, 0)) + rng.normal(0, 3, img.shape)).clip(0, 255).astype(np.uint8)
+    lines = [["gitsin", [[0.03, 0.2], [0.05, 0.8]]], ["kalsin", [[0.45, 0.9], [0.7, 0.9]]]]
+    auto, _ = Z.photo(img)
+    keep, _ = Z.photo(img, Z.drawn(lines, "kalsin", (w, h)), Z.drawn(lines, "gitsin", (w, h)))
+    top = fig & (yy < 200)
+    assert (auto & top).mean() / top.mean() > 0.95 and (keep & top).mean() / top.mean() > 0.95
+    assert (auto & ~keep).sum() < 0.02 * auto.sum()
 
 
 def test_photo_red_line_opens_a_hole(photo):
