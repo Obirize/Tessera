@@ -16,7 +16,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
-import shapely
 from PIL import Image
 from scipy import ndimage as ndi
 from scipy.sparse import coo_matrix, csc_matrix, identity
@@ -609,8 +608,8 @@ def divide(lab, n, res, N, base=None, layout="mozaik", seed=7):
         return cut_few(m, k)
     S = np.full(lab.shape, -1, np.int32)
     nxt = 0
-    with ThreadPoolExecutor(6) as ex:
-        for (i, sl, m, k), (o, q) in zip(jobs, ex.map(work, jobs)):
+    with kesim.pool() as ex:                     # the biggest areas first: they take longest
+        for (i, sl, m, k), (o, q) in zip(jobs, kesim.big_first(ex, work, jobs, lambda j: j[2].size)):
             S[sl][m] = o[m] + nxt
             nxt += q
     S = fit(defragment(S, L), res)
@@ -644,18 +643,13 @@ def fit(S, res):
 def outlines(S, L, col, res, gap=0.4, edge=None):
     """(polygons, their colours, the stone in S each one comes from)"""
     polys, pc, ps = [], [], []
+    todo = []
     for i, sl in enumerate(ndi.find_objects(S + 1)):
-        if sl is None:
-            continue
-        m = S[sl] == i
-        P = kesim.outline(m, sl[0].start, sl[1].start, res)
-        if P is None:
-            continue
-        T = shapely.simplify(P.buffer(-gap / 2, quad_segs=3), 0.05)
-        if T.is_empty:
-            T = P.buffer(-gap / 5, quad_segs=3)
-        if edge is not None and not edge.covers(T):
-            T = T.intersection(edge)             # the exact curve instead of the pixel one
+        if sl is not None:
+            todo.append((i, sl, S[sl] == i))
+    Ps = kesim.outlines([(m, sl[0].start, sl[1].start) for _, sl, m in todo], res)
+    todo = [t for t, P in zip(todo, Ps) if P is not None]
+    for (i, sl, m), T in zip(todo, kesim.shrunk([P for P in Ps if P is not None], gap, edge)):
         c = int(col[L[sl][m][0]])
         for j, g in enumerate(sorted(kesim._parts(T), key=lambda g: -g.area)):
             if g.area >= (1.5 if j == 0 else 5.0):            # a neck can break: only a real second part counts

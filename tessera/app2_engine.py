@@ -112,6 +112,13 @@ def analyse(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[
     """frame: [kadraj, sekil] when not the whole picture is meant. (colours, advice). colours: the picture's main colours, each with the colour that stands for it in
     the mosaic [{"rgb", "pay", "oz", "ad", "hex"}], largest first; a photograph or painting (tur "ton") is
     simplified and its colours carry "yol": "ton". advice: {"tur", "puan": "iyi"|"orta"|"zor", "soz": [...]}"""
+    found, about = colours_of(image_path, width_mm, descreen_mode, n, tur, frame)
+    return found, advice(*about)
+
+
+def colours_of(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[int] = None,
+               tur: str = "auto", frame: Optional[list] = None) -> tuple:
+    """analyse without the advice: (colours, what advice() takes), so the advice can be written meanwhile."""
     from .pipeline import renk, sade
     img, native, k, soft, own = _look(image_path, os.path.getmtime(image_path), width_mm, descreen_mode,
                                       json.dumps(frame))
@@ -137,7 +144,7 @@ def analyse(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[
             for c, v in zip(found, share):
                 c["pay"] = round(float(v), 4)
             found.sort(key=lambda c: -c["pay"])
-    return found, advice(img, native, width_mm, k, kind, soft)
+    return found, (img, native, width_mm, k, kind, soft)
 
 
 def settle(found: list, previous: list) -> list:
@@ -468,33 +475,14 @@ def build_mosaic_for(r: Recipe, preview: bool = True, image_cache: Optional[dict
     """Recipe -> (Mosaic, auto zone mask or None). Thread/process safe. ``progress(f, msg)`` gets
     0..1 over the whole build: image load ~10 %, then the pipeline's own stages when
     build_mosaic takes a progress callback (feature-detected), else stage markers from here."""
-    from .pipeline import build_mosaic, load_image, zones_from_shapes
+    from .pipeline import build_mosaic, zones_from_shapes
     prog = progress or (lambda f, msg: None)
     s = s or r.settings(preview)
-    src, frame = r.source(), json.dumps(r.frame)
-    key = (r.image_path, frame, round(s.width_mm, 3), s.mm_per_px, str(s.descreen))
-    if image_cache is not None and image_cache.get("key") == key:
-        img = image_cache["img"]
-    else:
-        prog(0.0, "Görsel okunuyor")
-        img = load_image(src, s)
-        if image_cache is not None:
-            image_cache.clear()
-            image_cache.update(key=key, img=img)
-    prog(0.1, "Bölgeler hazırlanıyor")
+    src = r.source()
+    img, found = picture_and_zones(r, s, src, image_cache, auto_zone_cache, prog)
     h, w = img.shape[:2]
     mask = r.zone_mask
-    found = None
-    if (mask is None and not r.zones_from_file and not r.shapes
-            and (r.fine or {}).get("otomatik_bolge", True)):
-        ak = (r.image_path, frame, h, w)
-        if auto_zone_cache is not None and ak in auto_zone_cache:
-            found = auto_zone_cache[ak]
-        else:
-            found = auto_zones(img, s)
-            if auto_zone_cache is not None:
-                auto_zone_cache.clear()
-                auto_zone_cache[ak] = found
+    if found is not None:
         mask = found["mask"]
         if r.rays_center is None and found.get("rays_center"):
             rc = found["rays_center"]
@@ -511,6 +499,38 @@ def build_mosaic_for(r: Recipe, preview: bool = True, image_cache: Optional[dict
         m = build_mosaic(img, s, zone)
     prog(1.0, "Mozaik hazır")
     return m, found
+
+
+def picture_and_zones(r: Recipe, s: Settings, src, image_cache: Optional[dict] = None,
+                      auto_zone_cache: Optional[dict] = None, prog=None) -> tuple:
+    """(the working picture, auto zone suggestion or None) of a build; neither depends on the colours, so the
+    caches can be filled while the colours are still looked for."""
+    from .pipeline import load_image
+    prog = prog or (lambda f, msg: None)
+    frame = json.dumps(r.frame)
+    key = (r.image_path, frame, round(s.width_mm, 3), s.mm_per_px, str(s.descreen))
+    if image_cache is not None and image_cache.get("key") == key:
+        img = image_cache["img"]
+    else:
+        prog(0.0, "Görsel okunuyor")
+        img = load_image(src, s)
+        if image_cache is not None:
+            image_cache.clear()
+            image_cache.update(key=key, img=img)
+    prog(0.1, "Bölgeler hazırlanıyor")
+    h, w = img.shape[:2]
+    found = None
+    if (r.zone_mask is None and not r.zones_from_file and not r.shapes
+            and (r.fine or {}).get("otomatik_bolge", True)):
+        ak = (r.image_path, frame, h, w)
+        if auto_zone_cache is not None and ak in auto_zone_cache:
+            found = auto_zone_cache[ak]
+        else:
+            found = auto_zones(img, s)
+            if auto_zone_cache is not None:
+                auto_zone_cache.clear()
+                auto_zone_cache[ak] = found
+    return img, found
 
 
 def picture_size(path: str) -> tuple:
@@ -668,6 +688,27 @@ plain = _plain
 
 
 # ------------------------------------------------------------------ the worker thread
+class _Later:
+    """fn(*args) on a helper thread; get() waits for it (and raises what it raised)."""
+
+    def __init__(self, fn, *args):
+        self._out = self._err = None
+        self._t = threading.Thread(target=self._run, args=(fn, args), daemon=True)
+        self._t.start()
+
+    def _run(self, fn, args):
+        try:
+            self._out = fn(*args)
+        except BaseException as e:  # noqa: BLE001 - handed to get()
+            self._err = e
+
+    def get(self):
+        self._t.join()
+        if self._err is not None:
+            raise self._err
+        return self._out
+
+
 class Superseded(Exception):
     """The user has asked for something else meanwhile; whatever is running is not needed any more."""
 
@@ -876,16 +917,23 @@ class Engine:
             self._check()
             self.cb["draft"](gen, {"zemin": {**rep, "png": zemin.overlay(k), "kutu": (r.kadraj or {}).get("kutu")}})
         P(0.0, "Renkler bulunuyor" if find else "Taşlar hesaplanıyor")
+        adv = None
         if find:
+            # the picture and its zones need no colours: they are read meanwhile, on a thread of their own
+            early = threading.Thread(target=self._draft_picture, args=(r.copy(),), daemon=True)
+            early.start()
             f = {**FINE_DEFAULTS, **(r.fine or {})}
-            colours, adv = analyse(r.image_path, r.width_mm, f.get("tram", "auto"), f.get("renk_sayisi"),
-                                   f.get("tur", "auto"), r.frame)
+            try:
+                colours, about = colours_of(r.image_path, r.width_mm, f.get("tram", "auto"), f.get("renk_sayisi"),
+                                            f.get("tur", "auto"), r.frame)
+            finally:
+                early.join()
             r.use_colours(settle(colours, r.colours))
-            r.uygun = adv
-            new = {"colours": copy.deepcopy(r.colours), "uygun": adv}
+            adv = _Later(advice, *about)              # only shown with the stones: written while they are cut
+            new = {"colours": copy.deepcopy(r.colours)}
         elif r.uygun:
-            r.uygun = new_advice = advise_again(r)
-            new = {"colours": copy.deepcopy(r.colours), "uygun": new_advice}
+            adv = _Later(advise_again, r.copy())
+            new = {"colours": copy.deepcopy(r.colours)}
         key = r.build_key()
         if self._draft is not None and self._draft["key"] == key:
             m = self._draft["m"]
@@ -900,12 +948,21 @@ class Engine:
         P(0.92, "Çiziliyor")
         jpg = png_bytes(render_cut(m, 1000), "JPEG", 90)
         self._check()
+        if adv is not None:
+            r.uygun = new["uygun"] = adv.get()
         w_mm, h_mm = m.size_mm
         self.cb["draft"](gen, {**new, "jpg": jpg, "size_mm": [round(w_mm, 1), round(h_mm, 1)], "tiles": int(m.n_tiles),
                                "parca": piece_info(m)})
         e = estimates(m).get(m.settings.mode) or {}
         self._check()
         self.cb["draft"](gen, {"tahmin": {k: e.get(k) for k in ("tabla", "saat", "gram")}})
+
+    def _draft_picture(self, r: Recipe) -> None:
+        """Fills the draft's picture and zone caches (on a helper thread, while the colours are looked for)."""
+        try:
+            picture_and_zones(r, r.settings(True), r.source(), self._draft_image, self._draft_zones)
+        except Exception:  # noqa: BLE001 - the build reads them itself then, and says what is wrong
+            pass
 
     def _do_plates(self, gen: int, m) -> None:
         from .export.api import plates_glb
