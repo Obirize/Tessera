@@ -64,13 +64,22 @@ class Prep(QObject):
 
     @Slot(str)
     def set(self, patch: str) -> None:
-        """{"kutu": [...]} | {"sekil": {...}} | {"op": "don"|"ayna"} | {"width_cm"} | {"parca"} | {"tek_taban"}"""
+        """{"kutu": [...]} | {"sekil": {...}} | {"op": "don"|"ayna"} | {"width_cm"} | {"parca"} | {"tek_taban"}
+        | {"zemin": true|false} | {"tik": [x, y, "tek"|"renk"]} (a click on the frame) | {"geri": true} (undo a click)"""
         r = self.recipe
         if r is None:
             return
         d = json.loads(patch or "{}")
         k = dict(r.kadraj or {"don": 0, "ayna": False, "kutu": list(WHOLE)})
-        sekil = d["sekil"] if "sekil" in d else r.sekil
+        z = (r.sekil or {}).get("zemin")
+        sekil = dict(d["sekil"] if "sekil" in d else r.sekil or {"tur": "dikdortgen"})
+        if "zemin" in d:
+            z = {"tiklar": []} if d["zemin"] else None
+        if z is not None and d.get("tik"):
+            z = {"tiklar": z["tiklar"] + [d["tik"]]}
+        if z is not None and d.get("geri"):
+            z = {"tiklar": z["tiklar"][:-1]}
+        was = dict(k)
         if d.get("kutu"):
             k["kutu"] = d["kutu"]
         x0, y0, x1, y1 = k["kutu"]
@@ -82,6 +91,13 @@ class Prep(QObject):
             k["kutu"] = [1 - x1, y0, 1 - x0, y1]
         if (sekil or {}).get("tur") == "daire":
             k["kutu"] = square(k["kutu"], *self.turned_size(k))
+        turned = (k["don"], k["ayna"]) != (was["don"], was["ayna"])
+        moved = turned or max(abs(float(u) - v) for u, v in zip(k["kutu"], was["kutu"])) > 1e-4
+        if z is not None and moved:
+            z = {"tiklar": []}                    # the clicks were on another part of the picture
+        sekil.pop("zemin", None)
+        if z is not None:
+            sekil["zemin"] = z
         before = r.build_key()
         self._find |= r.set_frame(k, sekil)
         if "width_cm" in d:
@@ -134,6 +150,7 @@ class Prep(QObject):
         w, h = self.turned_size(k)
         return {"open": True, "yeni": self.new, "ad": r.name or E.Project(image_path=r.image_path).display_name(),
                 "src": self._picture(k), "w": w, "h": h, "kutu": k["kutu"], "sekil": r.sekil or {"tur": "dikdortgen"},
+                "zemin": (r.sekil or {}).get("zemin"),
                 "width_cm": round(r.width_mm / 10, 1), "parca": r.fine.get("parca"), "tek_taban": r.fine.get("tek_taban"),
                 "hexes": dict(E.unique_names(r.colours)), "mode": r.mode, "gen": self.gen}
 
@@ -170,6 +187,13 @@ class Prep(QObject):
             self.recipe.use_colours(d.pop("colours"))
             self.recipe.uygun = d.pop("uygun")
             self._emit()
+        if "zemin" in d:                          # the background as found: it comes before the stones
+            z = d.pop("zemin")
+            self.bridge.serial += 1
+            z["url"] = self.bridge.blobs.put(f"prep_{self.bridge.serial}.png", z.pop("png"), "image/png", keep=64)
+            self.result.emit(json.dumps({"zemin": z}, ensure_ascii=False))
+            if not d:
+                return
         jpg = d.pop("jpg", None)
         if jpg:
             self.bridge.serial += 1

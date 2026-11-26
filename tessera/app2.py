@@ -411,11 +411,16 @@ class Bridge(QObject):
         key = f"src_{abs(hash((path, json.dumps(frame)))) % 10**8}.jpg"
         if self.blobs.get(key) is None:
             try:
+                from PIL import Image
                 from .resim import open_rgb
                 if frame:                         # the pipeline loads slowly: only for a cut picture
-                    from .pipeline.kadraj import picture
-                    path = picture(path, *frame)
-                im = open_rgb(path)
+                    from .pipeline.kadraj import inside
+                    from .pipeline.zemin import frame_picture
+                    a = frame_picture(path, frame[0])
+                    m = inside(path, frame[0], frame[1], a.shape[1::-1])
+                    im = Image.fromarray(a if m is None else np.where(m[..., None], a, np.uint8([232, 226, 216])))
+                else:
+                    im = open_rgb(path)
                 im.thumbnail((240, 240))
                 self.blobs.put(key, E.png_bytes(np.asarray(im), "JPEG", 85), "image/jpeg", keep=64)
             except Exception:  # noqa: BLE001

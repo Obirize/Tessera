@@ -10,6 +10,7 @@ Bir görseli, taşlarını tek tek 3D yazıcıdan basabileceğin bir mozaiğe ç
 - **Parça sayısını sen seçersin.** 10 cm'lik 20 parçalık bir iş de olur, binlerce taşlık bir duvar da.
 - **İstersen tek parça taban.** Çizgi rengi, taşların oturduğu yuvalı tabana dönüşür.
 - **Kırpma ve şekil:** düz, yuvarlak köşe, daire, oval.
+- **Arka planı kaldırma:** çizim, logo ve afişlerde düz renkli arka plan kalkar, eser kendi dış çizgisiyle kesilir. Tıklayarak düzeltilir.
 - **Dört doku:** Mozaik, Kırık taş, Blok, İri parça.
 - **Çıktı:** Bambu Studio 3MF tablaları (renk renk ya da AMS panelleri), her taşın STL'i, A4/A3 montaj şablonu, kılavuz.
 

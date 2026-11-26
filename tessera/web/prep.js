@@ -6,7 +6,7 @@ const NS = 'http://www.w3.org/2000/svg';
 const RATIOS = { kare: 1, dikey: 3 / 4, yatay: 4 / 3 };   // width / height
 
 export function makePrep() {
-  let prep = null, P = null, R = null, tab = 'gorsel', busy = false, ratio = 'tamam', err = '';
+  let prep = null, P = null, R = null, Z = null, tab = 'gorsel', busy = false, ratio = 'tamam', err = '';
   const send = (d) => prep.set(JSON.stringify(d));
   const root = $('#prep'), view = $('#p-view'), img = $('#p-img'), svg = $('#p-svg');
 
@@ -44,6 +44,10 @@ export function makePrep() {
     const x = rect.x + x0 * rect.w, y = rect.y + y0 * rect.h, w = (x1 - x0) * rect.w, h = (y1 - y0) * rect.h;
     const sh = shapePath(x, y, w, h);
     el('path', { d: `M${rect.x} ${rect.y}h${rect.w}v${rect.h}h${-rect.w}z${sh}`, class: 'p-dark', 'fill-rule': 'evenodd' });
+    const same = (a, b) => a && b && a.every((v, i) => Math.abs(v - b[i]) < 1e-4);
+    if (P.zemin && Z && Z.url && same(Z.kutu || [0, 0, 1, 1], box)) {
+      el('image', { href: Z.url, x, y, width: w, height: h, preserveAspectRatio: 'none', class: 'p-cut' });
+    }
     el('rect', { x, y, width: w, height: h, class: 'p-box', 'data-h': 'm' });
     if (P.sekil.tur !== 'dikdortgen') el('path', { d: sh, class: 'p-shape' });
     for (const t of [1 / 3, 2 / 3]) {
@@ -68,12 +72,14 @@ export function makePrep() {
   svg.addEventListener('pointerdown', (e) => {
     const h = e.target.dataset && e.target.dataset.h;
     if (!h || !P) return;
-    dragging = { h, x: e.clientX, y: e.clientY, b: [...box] };
+    dragging = { h, x: e.clientX, y: e.clientY, b: [...box], shift: e.shiftKey, moved: false };
     svg.setPointerCapture(e.pointerId);
   });
   svg.addEventListener('pointermove', (e) => {
     if (!dragging) return;
     const { h, b } = dragging;
+    if (!dragging.moved && Math.hypot(e.clientX - dragging.x, e.clientY - dragging.y) < 4) return;
+    dragging.moved = true;
     const dx = (e.clientX - dragging.x) / rect.w, dy = (e.clientY - dragging.y) / rect.h;
     let [x0, y0, x1, y1] = b;
     if (h === 'm') {
@@ -106,7 +112,15 @@ export function makePrep() {
   });
   const drop = () => {
     if (!dragging) return;
+    const d = dragging;
     dragging = null;
+    if (!d.moved && d.h === 'm' && P.zemin) {    // a click, not a drag: this area goes or comes back
+      const r = svg.getBoundingClientRect(), [x0, y0, x1, y1] = box;
+      const fx = (d.x - r.left - rect.x - x0 * rect.w) / ((x1 - x0) * rect.w);
+      const fy = (d.y - r.top - rect.y - y0 * rect.h) / ((y1 - y0) * rect.h);
+      if (fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1) send({ tik: [fx, fy, d.shift ? 'renk' : 'tek'] });
+      return;
+    }
     if (box.some((v, i) => Math.abs(v - P.kutu[i]) > 1e-4)) send({ kutu: box });
   };
   svg.addEventListener('pointerup', drop);
@@ -150,6 +164,12 @@ export function makePrep() {
     const cut = [(P.kutu[2] - P.kutu[0]) * P.w, (P.kutu[3] - P.kutu[1]) * P.h];
     $('#p-h').textContent = `× ${fmt0.format(P.width_cm * cut[1] / cut[0])} cm`;
     renderRatio();
+    root.classList.toggle('zemin', !!P.zemin);
+    for (const b of $('#p-bg').children) b.classList.toggle('on', (b.dataset.v === 'kaldir') === !!P.zemin);
+    const zs = P.zemin && Z && Z.soz;
+    $('#p-bg-fit').className = 'fit on ' + (zs ? Z.puan : 'orta');
+    $('#p-bg-t').innerHTML = zs ? Z.soz.map((t) => `<p>${t}</p>`).join('') : '<p>Arka plan aranıyor…</p>';
+    $('#p-bg-geri').style.visibility = P.zemin && P.zemin.tiklar.length ? 'visible' : 'hidden';
     piece(busy);
     plateOffer({ box: $('#p-base'), text: $('#p-base-t'), check: $('#p-base-c') }, P.tek_taban, R && R.parca, P.hexes, (v) => send({ tek_taban: v }));
     $('#p-fit').className = 'fit' + (R && R.soz && R.soz.length && !busy ? ' on ' + R.puan : '');
@@ -169,6 +189,8 @@ export function makePrep() {
   $('#p-ratio').onclick = (e) => { const b = e.target.closest('button'); if (b && !b.disabled) setRatio(b.dataset.v); };
   $('#p-don').onclick = () => { if (RATIOS[ratio] && ratio !== 'kare') ratio = ratio === 'dikey' ? 'yatay' : 'dikey'; send({ op: 'don' }); };
   $('#p-ayna').onclick = () => send({ op: 'ayna' });
+  $('#p-bg').onclick = (e) => { const b = e.target.closest('button'); if (b) { Z = null; send({ zemin: b.dataset.v === 'kaldir' }); } };
+  $('#p-bg-geri').onclick = () => send({ geri: true });
   $('#p-shape').onclick = (e) => { const b = e.target.closest('button'); if (b) send({ sekil: { tur: b.dataset.v, r: parseFloat($('#p-r').value) } }); };
   $('#p-r').oninput = () => { if (P) { P.sekil.r = parseFloat($('#p-r').value); draw(); } };
   $('#p-r').onchange = () => send({ sekil: { tur: 'yuvarlak', r: parseFloat($('#p-r').value) } });
@@ -186,13 +208,17 @@ export function makePrep() {
       prep.state.connect((j) => {
         const s = JSON.parse(j), was = P;
         P = s.open ? s : null;
-        if (!P) { R = null; err = ''; busy = false; render(); return; }
-        if (!was || was.ad !== P.ad) { R = null; tab = 'gorsel'; ratio = P.kutu.every((v, i) => v === [0, 0, 1, 1][i]) ? 'tamam' : 'serbest'; }
+        if (!P) { R = null; Z = null; err = ''; busy = false; render(); return; }
+        if (!was || was.ad !== P.ad) { R = null; Z = null; tab = 'gorsel'; ratio = P.kutu.every((v, i) => v === [0, 0, 1, 1][i]) ? 'tamam' : 'serbest'; }
         box = [...P.kutu];
         render();
         place();
       });
-      prep.result.connect((j) => { R = { ...(R || {}), ...JSON.parse(j) }; busy = false; err = ''; render(); });
+      prep.result.connect((j) => {
+        const d = JSON.parse(j);
+        if (d.zemin) { Z = d.zemin; render(); draw(); return; }   // the stones are still coming
+        R = { ...(R || {}), ...d }; busy = false; err = ''; render();
+      });
       prep.progress.connect((j) => {
         const d = JSON.parse(j);
         if (d.err) { err = d.err; busy = false; render(); return; }

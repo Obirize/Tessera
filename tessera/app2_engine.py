@@ -113,6 +113,19 @@ def analyse(image_path: str, width_mm: float, descreen_mode="auto", n: Optional[
         found = sade.find(img, width_mm, n)
     else:
         found = renk.paint(copy.deepcopy(own()) if n is None else renk.find(img, n))
+    if frame and frame[1]:                           # the shares of what becomes stones, not of the filled outside
+        from .pipeline.kadraj import inside
+        small = renk.shrink(img, 500)
+        m = inside(image_path, frame[0], frame[1], small.shape[1::-1])
+        if m is not None and m.any():
+            lab = renk.label(small, found) if kind != "ton" else sade.label(small, found, width_mm)
+            if lab.shape != m.shape:
+                from PIL import Image
+                lab = np.asarray(Image.fromarray(lab.astype(np.uint8)).resize(m.shape[::-1], Image.NEAREST))
+            share = np.bincount(lab[m], minlength=len(found)) / m.sum()
+            for c, v in zip(found, share):
+                c["pay"] = round(float(v), 4)
+            found.sort(key=lambda c: -c["pay"])
     return found, advice(img, native, width_mm, k, kind, soft)
 
 
@@ -274,6 +287,11 @@ class Recipe:
         from .pipeline.kadraj import picture
         return picture(self.image_path, self.kadraj, self.sekil)
 
+    def cutout(self):
+        """What stays of the used part when the background is taken away (bool array), None = all of it."""
+        from .pipeline.kadraj import kept
+        return kept(self.image_path, self.kadraj, self.sekil) if self.image_path else None
+
     def set_frame(self, kadraj, sekil) -> bool:
         """Another part or outline; what was found on the picture before does not fit any more. Whether it changed."""
         from .pipeline.kadraj import clean_frame, clean_shape
@@ -344,6 +362,7 @@ class Recipe:
         s = Settings()
         s.width_mm = float(self.width_mm)
         s.shape = self.sekil
+        s.cutout = self.cutout()
         if self.colours:
             s.palette = [filament_for(n, h) for n, h in unique_names(self.colours)]
             s.source_colours = [{"rgb": list(c["rgb"]), "oz": c["oz"], "hedef": t, "yol": c.get("yol", "")}
@@ -573,10 +592,15 @@ def thumb_mosaic(img: np.ndarray, r: "Recipe", s: Settings, found: Optional[dict
     g = ndi.gaussian_gradient_magnitude(img.mean(2), 2.0)
     s = copy.copy(s)
     if s.shape:                         # the detail is a plain square from within the outline
+        from PIL import Image
         from .pipeline.kadraj import mask, outline
         p = outline(s.shape, w, h)
         g = np.where(mask(p, (w, h), 1.0), g, -float(g.max())) if p is not None else g
-        s.shape = None
+        cut = getattr(s, "cutout", None)
+        if cut is not None:
+            inside = np.asarray(Image.fromarray(cut.astype(np.uint8) * 255).resize((w, h), Image.BILINEAR)) > 127
+            g = np.where(ndi.minimum_filter(inside, side // 3 | 1), g, -float(g.max()))
+        s.shape = s.cutout = None
     dens = ndi.uniform_filter(g, side)
     dens[: side // 2] = dens[-(side // 2):] = 0
     dens[:, : side // 2] = dens[:, -(side // 2):] = 0
@@ -834,6 +858,12 @@ class Engine:
             self._check()
             self.cb["draft"](gen, {"f": float(f), "msg": msg})
         new = {}
+        if (r.sekil or {}).get("zemin") is not None:
+            P(0.0, "Arka plan aranıyor")
+            from .pipeline import zemin
+            k, rep = zemin.keep(r.image_path, r.kadraj, r.sekil["zemin"])
+            self._check()
+            self.cb["draft"](gen, {"zemin": {**rep, "png": zemin.overlay(k), "kutu": (r.kadraj or {}).get("kutu")}})
         P(0.0, "Renkler bulunuyor" if find else "Taşlar hesaplanıyor")
         if find:
             f = {**FINE_DEFAULTS, **(r.fine or {})}

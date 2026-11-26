@@ -10,6 +10,7 @@ from scipy import ndimage as ndi
 
 from ..geometry.plate import wall_height
 from ..model import Mosaic
+from ..pipeline.kadraj import draw
 
 WALL = (214, 208, 198)
 
@@ -55,7 +56,7 @@ def render_cut(m: Mosaic, width_px: int = 1500, az: float = -130.0, el: float = 
     col = pal[ci] * (1 + val[I])[..., None] * (ao * (.38 + .82 * dif * (1 - .75 * sh)))[..., None]
     if m.outline is not None:                # outside the artwork: the bare wall
         o = Image.new("L", (W, H), 0)
-        ImageDraw.Draw(o).polygon([(x * px, y * px) for x, y in m.outline.exterior.coords], fill=255)
+        draw(ImageDraw.Draw(o), m.outline, lambda x, y: (x * px, y * px))
         col[np.asarray(o) == 0] = WALL
     out = Image.fromarray(np.clip(col, 0, 255).astype(np.uint8))
     return np.asarray(out.resize((W // ss, H // ss), Image.BOX))

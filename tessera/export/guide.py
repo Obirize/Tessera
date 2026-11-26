@@ -270,7 +270,8 @@ def write_guide_stones(L, out_dir: str, mode: str, plates_info: list) -> list[st
     k = min((PAGE_W - 120) / w_mm, (PAGE_H - 560) / h_mm)
     ox, oy = (PAGE_W - w_mm * k) / 2, 190
     if pieces and m.plate is not None:
-        d.polygon([(ox + x * k, oy + y * k) for x, y in m.plate.exterior.coords], fill=tuple(pal[m.plate_colour].rgb))
+        from ..pipeline.kadraj import draw
+        draw(d, m.plate, lambda x, y: (ox + x * k, oy + y * k), tuple(pal[m.plate_colour].rgb), (255, 255, 255))
     for st in L.stones:
         d.polygon([(ox + x * k, oy + (h_mm - y) * k) for x, y in st.poly.exterior.coords], fill=tuple(pal[st.colour].rgb))
     from .template import page_grid

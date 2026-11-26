@@ -2,8 +2,8 @@
 
 kadraj: {"don": 0|90|180|270 (clockwise), "ayna": bool, "kutu": [x0, y0, x1, y1]}, the box as fractions of the
         picture after it was turned; None = the whole picture as it is
-sekil:  {"tur": "dikdortgen"|"yuvarlak"|"daire"|"oval", "r": corner radius as a share of the shorter side};
-        None = rectangle
+sekil:  {"tur": "dikdortgen"|"yuvarlak"|"daire"|"oval", "r": corner radius as a share of the shorter side,
+         "zemin": the background taken away (pipeline.zemin)}; None = rectangle
 """
 from __future__ import annotations
 
@@ -42,14 +42,19 @@ def clean_frame(k):
 
 
 def clean_shape(s):
-    if not isinstance(s, dict) or s.get("tur") not in SHAPES[1:]:
+    from .zemin import clean
+    if not isinstance(s, dict):
         return None
-    if s["tur"] != "yuvarlak":
-        return {"tur": s["tur"]}
-    try:
-        return {"tur": "yuvarlak", "r": round(min(0.5, max(0.02, float(s.get("r", 0.15)))), 3)}
-    except (TypeError, ValueError):
-        return {"tur": "yuvarlak", "r": 0.15}
+    out = {"tur": s.get("tur") if s.get("tur") in SHAPES else "dikdortgen"}
+    if out["tur"] == "yuvarlak":
+        try:
+            out["r"] = round(min(0.5, max(0.02, float(s.get("r", 0.15)))), 3)
+        except (TypeError, ValueError):
+            out["r"] = 0.15
+    z = clean(s.get("zemin"))
+    if z is not None:
+        out["zemin"] = z
+    return None if out == {"tur": "dikdortgen"} else out
 
 
 # ------------------------------------------------------------------ the picture
@@ -79,18 +84,40 @@ def outline(sekil, w: float, h: float):
     return None
 
 
-def fill_outside(a: np.ndarray, sekil) -> np.ndarray:
-    """What lies outside the shape takes the colours at its edge, so it has no say in colours or zones."""
-    p = outline(sekil, *a.shape[1::-1])
-    if p is None:
-        return a
-    inside = mask(p, a.shape[1::-1], 1.0)
-    i = ndi.distance_transform_edt(~inside, return_distances=False, return_indices=True)
-    return a[i[0], i[1]]
+def fill_outside(a: np.ndarray, sekil, keep=None) -> np.ndarray:
+    """What lies outside the shape, and the background taken away (keep: what stays, any size), takes the
+    colours at its edge, so it has no say in colours or zones."""
+    from .zemin import bleed
+    W, H = a.shape[1::-1]
+    p, inside, rim = outline(sekil, W, H), None, 0
+    if p is not None:
+        inside = mask(p, (W, H), 1.0)
+    if keep is not None and not keep.all():
+        k = np.asarray(Image.fromarray(keep.astype(np.uint8) * 255).resize((W, H), Image.BILINEAR)) > 127
+        inside = k if inside is None else inside & k
+        rim = max(1, round(2 * W / keep.shape[1]))         # the blended edge of the background goes too
+    return a if inside is None else bleed(a, inside, rim)
+
+
+def polygons(g) -> list:
+    """The polygons of any shapely geometry."""
+    if g is None or g.is_empty:
+        return []
+    if g.geom_type == "Polygon":
+        return [g]
+    return [q for p in getattr(g, "geoms", []) for q in polygons(p)]
+
+
+def draw(d, g, f, fill=255, hole=0) -> None:
+    """A geometry (mm) into an ImageDraw; f: mm -> px. Holes are drawn with ``hole``."""
+    for p in polygons(g):
+        d.polygon([f(x, y) for x, y in p.exterior.coords], fill=fill)
+        for q in p.interiors:
+            d.polygon([f(x, y) for x, y in q.coords], fill=hole)
 
 
 def mask(poly, size, res: float) -> np.ndarray:
-    """Pixels (size = W, H; res mm each) whose larger part lies inside the polygon."""
+    """Pixels (size = W, H; res mm each) whose larger part lies inside the outline (any geometry, holes too)."""
     from PIL import ImageDraw
     W, H = size
     k, band = 4, 512
@@ -98,24 +125,45 @@ def mask(poly, size, res: float) -> np.ndarray:
     for y0 in range(0, H, band):
         h = min(band, H - y0)
         im = Image.new("L", (W * k, h * k))
-        ImageDraw.Draw(im).polygon([(x / res * k - .5, (y / res - y0) * k - .5) for x, y in poly.exterior.coords], fill=255)
+        draw(ImageDraw.Draw(im), poly, lambda x, y: (x / res * k - .5, (y / res - y0) * k - .5))
         out[y0:y0 + h] = np.asarray(im.resize((W, h), Image.BOX)) >= 128
     return out
 
 
 @lru_cache(maxsize=2)
 def _prepared(path: str, mtime: float, kadraj: str, sekil: str) -> np.ndarray:
-    from .build import open_rgb
+    from ..resim import open_rgb
     k, s = json.loads(kadraj), json.loads(sekil)
     im = turned(open_rgb(path), k)
-    a = fill_outside(np.asarray(im.crop(pixels(k, *im.size))), s)
+    a = fill_outside(np.asarray(im.crop(pixels(k, *im.size))), s, kept(path, k, s))
     a.setflags(write=False)
     return a
 
 
+def kept(path: str, kadraj, sekil):
+    """What stays of the frame when the background is taken away (bool, zemin.SIDE), None = all of it."""
+    if (sekil or {}).get("zemin") is None:
+        return None
+    from .zemin import keep
+    k = keep(path, kadraj, sekil["zemin"])[0]
+    return None if k.all() else k
+
+
+def inside(path: str, kadraj, sekil, size):
+    """Where the stones are, in a picture of the frame of this size (W, H); None = everywhere."""
+    W, H = size
+    p, k, m = outline(sekil, W, H), kept(path, kadraj, sekil), None
+    if p is not None:
+        m = mask(p, (W, H), 1.0)
+    if k is not None:
+        k = np.asarray(Image.fromarray(k.astype(np.uint8) * 255).resize((W, H), Image.BILINEAR)) > 127
+        m = k if m is None else m & k
+    return m
+
+
 def picture(path: str, kadraj=None, sekil=None):
     """What the pipeline sees: the path itself when nothing is cut, else the prepared picture."""
-    if kadraj is None and (sekil is None or sekil.get("tur") == "dikdortgen"):
+    if kadraj is None and (sekil is None or sekil == {"tur": "dikdortgen"}):
         return path
     return _prepared(path, os.path.getmtime(path), json.dumps(kadraj), json.dumps(sekil))
 

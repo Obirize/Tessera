@@ -563,6 +563,13 @@ def _build_kesim(image, img, source, settings, zone_map, ds_mode, pal, to_full, 
     if base is not None:
         base = int(np.flatnonzero((pal == _check_palette(settings)[base]).all(1))[0])
     shape = kadraj.outline(settings.shape, w * mm, h * mm)
+    cut = getattr(settings, "cutout", None)      # what stays when the background is taken away (zemin)
+    if cut is not None:
+        from .kesim import resolution
+        from .zemin import silhouette
+        sil = silhouette(cut, w * mm, h * mm, resolution(w * mm))
+        if sil is not None:
+            shape = sil if shape is None else sil.intersection(shape)
     r = kesim.build(src, w * mm, pal, colours=cols, to=to, zoom=zoom, labels=labels,
                     pieces=settings.pieces, base=base, shape=shape,
                     layout=settings.style, zone=zone, centre=centre,

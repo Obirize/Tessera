@@ -242,10 +242,18 @@
         <div class="p-shapes" id="p-shape"><button data-v="dikdortgen"><i></i>Düz</button><button data-v="yuvarlak"><i></i>Yuvarlak köşe</button><button data-v="daire"><i></i>Daire</button><button data-v="oval"><i></i>Oval</button></div>
         <label class="p-rr" id="p-rr"><span>Köşe yuvarlağı</span><input type="range" id="p-r" min="0.05" max="0.5" step="0.01" value="0.15"></label>
       </section>
-      <section class="q"><h2><span class="n">3</span>Boyut</h2>
+      <section class="q"><h2><span class="n">3</span>Arka plan</h2>
+        <div class="seg" id="p-bg"><button data-v="kalsin">Kalsın</button><button data-v="kaldir">Kaldır</button></div>
+        <div class="p-bg-on" id="p-bg-on">
+          <div class="fit on" id="p-bg-fit"><i></i><div id="p-bg-t"></div></div>
+          <div class="p-links"><button class="link small" id="p-bg-geri">Son tıklamayı geri al</button><span>Shift: o renkteki her yer</span></div>
+        </div>
+        <div class="p-bg-s" id="p-bg-s">Çizim, logo ve afişlerde düz renkli arka planı kaldırır; geriye kalan, eserin dış çizgisi olur.</div>
+      </section>
+      <section class="q"><h2><span class="n">4</span>Boyut</h2>
         <div class="p-size"><span class="field"><input id="p-w" type="number" min="10" max="300" step="1"><span class="unit">cm</span></span><span class="derived" id="p-h"></span></div>
       </section>
-      <section class="q"><h2><span class="n">4</span>Kaç parça?</h2>
+      <section class="q"><h2><span class="n">5</span>Kaç parça?</h2>
         <div class="piece" id="p-piece">
           <div class="seg" id="p-pc-mode"><button data-v="auto">Dokuya göre</button><button data-v="sekil">Her şekil tek taş</button><button data-v="sayi">Sayı ver</button></div>
           <div class="piece-n"><span class="field"><input id="p-pc" type="number" min="2" max="20000" step="1"><span class="unit">taş</span></span><input type="range" id="p-pc-r" min="0" max="1000" step="1"></div>

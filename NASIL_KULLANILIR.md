@@ -23,6 +23,10 @@ Sonra **Dışa aktar**.
 
 - **Kadraj:** kare, dikey, yatay ya da köşelerinden çekerek serbest kırp; döndür, aynala
 - **Şekil:** düz, yuvarlak köşe, daire, oval. Taşlar kenara göre kesilir.
+- **Arka plan:** "Kaldır" deyince çizim, logo ve afişlerde düz renkli arka plan bulunur ve kaldırılır; geriye kalan, eserin dış çizgisi olur (tek parça taban da bu biçimi alır).
+  - Görselde bir yere tıkla: o alan gider ya da geri gelir. **Shift** ile tıklarsan o renkteki her yer gider.
+  - Program emin olamazsa hiçbir şeyi kendisi kaldırmaz ve nedenini söyler; o zaman kaldırmak istediğin yere tıklarsın.
+  - Fotoğraflarda henüz çalışmaz.
 - **Boyut** ve **parça sayısı**
 - **Taşlar** düğmesi gerçek taşları gösterir. "Ekle" deyene kadar projede hiçbir şey değişmez.
 

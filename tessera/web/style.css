@@ -491,3 +491,11 @@ body.prep-open #bar .views, body.prep-open #bar .filemenu { visibility: hidden; 
 .p-foot { display: flex; align-items: center; gap: 20px; padding: 14px 28px 18px 24px; border-top: 1px solid var(--rule); }
 .p-foot .primary { width: 150px; height: 46px; margin-left: auto; }
 #p-fit { margin: 4px 0 8px; }
+.p-bg-on { display: none; }
+#prep.zemin .p-bg-on { display: block; }
+#prep.zemin .p-bg-s { display: none; }
+.p-bg-s { margin-top: 10px; font-size: 12.5px; line-height: 1.4; color: var(--ink-3); }
+#p-bg-fit { margin-top: 10px; }
+#p-bg-t p { margin: 0 0 4px; }
+#prep.zemin .p-box { cursor: crosshair; }
+.p-cut { pointer-events: none; }

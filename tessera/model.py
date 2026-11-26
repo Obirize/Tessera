@@ -97,6 +97,8 @@ class Settings:
     stone_scale: float = 1.0              # stone size factor
     pieces: object = None                 # how many stones: a number, "sekil" (every shape one stone), None (by texture)
     shape: Optional[dict] = None          # outline of the artwork (pipeline.kadraj), None = rectangle
+    # (a Settings may also carry ``cutout``: what stays of the picture when its background is taken away, a bool
+    # array of any size; it is not a field, so it never goes into a project file)
     plate_colour: Optional[int] = None    # palette index of the one-piece base plate the stones sit in (None: no plate)
     detail_adapt: float = 0.7             # R7: 0 = uniform stones, 1 = small stones only where detail needs them
     min_stone_mm: float = 1.2            # R6-3: no printed stone narrower than this (nozzle limit)
