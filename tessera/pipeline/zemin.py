@@ -30,6 +30,7 @@ MAX_CLICKS = 200
 MAX_LINES, MAX_POINTS = 60, 400
 LINE_W = 0.02            # a drawn line is this wide, as a share of the frame's longer side
 EIGHT = np.ones((3, 3), bool)
+RANK = {"iyi": 0, "orta": 1, "zor": 2}
 
 
 # ------------------------------------------------------------------ the wish, cleaned
@@ -214,33 +215,77 @@ class _Colours:
         return best
 
 
-def _mincut(Dbg, Dfg, Wh, Wv):
-    """The figure as the cheapest cut between "background" and "figure" (D*: cost of calling a pixel so)."""
+def _cut(n, a, b, wab, to_bg, to_fg):
+    """The cheapest cut of a graph of n pixels: pairs (a, b) with the price wab of parting them, to_bg / to_fg
+    the price of calling a pixel background / figure. -> bool, True = figure."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import breadth_first_order, maximum_flow
-    h, w = Dbg.shape
-    idx = np.arange(h * w).reshape(h, w)
-    S, T = h * w, h * w + 1
-    lo = np.minimum(Dbg, Dfg)
-    a, b = idx[:, :-1].ravel(), idx[:, 1:].ravel()
-    c, d = idx[:-1].ravel(), idx[1:].ravel()
-    rows = np.concatenate([a, b, c, d, np.full(h * w, S), idx.ravel()])
-    cols = np.concatenate([b, a, d, c, idx.ravel(), np.full(h * w, T)])
-    val = np.concatenate([Wh.ravel(), Wh.ravel(), Wv.ravel(), Wv.ravel(), (Dbg - lo).ravel(), (Dfg - lo).ravel()])
+    S, T = n, n + 1
+    i = np.arange(n)
+    lo = np.minimum(to_bg, to_fg)
+    rows = np.concatenate([a, b, np.full(n, S), i])
+    cols = np.concatenate([b, a, i, np.full(n, T)])
+    val = np.concatenate([wab, wab, to_bg - lo, to_fg - lo])
     val = np.minimum(np.round(val * 60.0), 2 ** 24).astype(np.int32)
     k = val > 0
-    G = coo_matrix((val[k], (rows[k], cols[k])), shape=(h * w + 2,) * 2).tocsr()
+    G = coo_matrix((val[k], (rows[k], cols[k])), shape=(n + 2,) * 2).tocsr()
     res = G - maximum_flow(G, S, T).flow
     res.data = np.where(res.data > 0, res.data, 0)
     res.eliminate_zeros()
-    m = np.zeros(h * w + 2, bool)
+    m = np.zeros(n + 2, bool)
     m[breadth_first_order(res, S, return_predecessors=False)] = True
-    return m[:h * w].reshape(h, w)
+    return m[:n]
 
 
-def photo(img, keep_hint=None, drop_hint=None, side=260, gamma=18.0, rounds=4, seed=3):
+def _mincut(Dbg, Dfg, Wh, Wv):
+    """The figure as the cheapest cut between "background" and "figure" (D*: cost of calling a pixel so)."""
+    h, w = Dbg.shape
+    idx = np.arange(h * w).reshape(h, w)
+    a = np.concatenate([idx[:, :-1].ravel(), idx[:-1].ravel()])
+    b = np.concatenate([idx[:, 1:].ravel(), idx[1:].ravel()])
+    return _cut(h * w, a, b, np.concatenate([Wh.ravel(), Wv.ravel()]), Dbg.ravel(), Dfg.ravel()).reshape(h, w)
+
+
+STEPS = ((0, 1, 1.0), (1, 0, 1.0), (1, 1, 0.5 ** 0.5), (1, -1, 0.5 ** 0.5))   # neighbours, diagonals too
+
+
+def _band_cut(band, sure, Dbg, Dfg, X, gamma):
+    """The cut again, only inside a band: what lies outside it is settled (sure: figure there). D*: the prices
+    for the band's pixels; X: the colours (whole picture) the price of parting two neighbours comes from."""
+    h, w = band.shape
+    n = int(band.sum())
+    idx = np.full((h, w), -1, np.int64)
+    idx[band] = np.arange(n)
+    to_bg, to_fg = Dbg.astype(np.float64).copy(), Dfg.astype(np.float64).copy()
+    pairs = []
+    for dy, dx, f in STEPS:
+        p = (slice(0, h - dy), slice(max(0, -dx), w - max(0, dx)))
+        q = (slice(dy, h), slice(max(0, dx), w + min(0, dx)))
+        one = band[p] | band[q]
+        d = ((X[p][one] - X[q][one]) ** 2).sum(-1)
+        pairs.append((idx[p][one], idx[q][one], sure[p][one], sure[q][one], f, d))
+    both = np.concatenate([d[(ip >= 0) & (iq >= 0)] for ip, iq, _, _, _, d in pairs])
+    beta = 1 / (2 * float(both.mean()) + 1e-6) if len(both) else 0.0
+    A, B, Wab = [], [], []
+    for ip, iq, sp, sq, f, d in pairs:
+        wgt = f * (gamma * np.exp(-beta * d) + 0.5)
+        inner = (ip >= 0) & (iq >= 0)
+        A.append(ip[inner]), B.append(iq[inner]), Wab.append(wgt[inner])
+        # a pair half outside: parting it is a price on the inside pixel's choice
+        for me, other, so in ((ip, iq, sq), (iq, ip, sp)):
+            k = (me >= 0) & (other < 0)
+            np.add.at(to_bg, me[k & so], wgt[k & so])
+            np.add.at(to_fg, me[k & ~so], wgt[k & ~so])
+    m = _cut(n, np.concatenate(A), np.concatenate(B), np.concatenate(Wab), to_bg, to_fg)
+    res = sure.copy()
+    res[band] = m
+    return res
+
+
+def photo(img, keep_hint=None, drop_hint=None, side=260, gamma=18.0, rounds=4, seed=3, fine=True):
     """-> (keep, info). The figure of a photograph: colour models of figure and background, refined by a
-    minimum cut, its edge then laid along the picture's own edges. hints: bool masks (img size) the user drew."""
+    minimum cut, its edge then laid along the picture's own edges and (fine) cut again at full size in a band
+    around it. hints: bool masks (img size) the user drew; the green lines also pull what lies with them."""
     from .renk import _stats, guided, lab32, shrink
     rng = np.random.default_rng(seed)
     im = shrink(img, side)
@@ -266,6 +311,7 @@ def photo(img, keep_hint=None, drop_hint=None, side=260, gamma=18.0, rounds=4, s
     fg, same = ell.copy(), []
     if ph is not None:
         fg |= ph
+    lean = _lean(sm, ph, pb if pb is not None else R) if ph is not None else None
     for it in range(rounds):
         sel_b = (~fg | R) if it else (R | ~_disk(ell, 0.10 * w, True))
         if pb is not None:
@@ -278,6 +324,8 @@ def photo(img, keep_hint=None, drop_hint=None, side=260, gamma=18.0, rounds=4, s
         cb, cf = _Colours(F[sel_b], 5, rng).cost(F), _Colours(F[sel_f], 5, rng).cost(F)
         lo = np.minimum(cb, cf)
         cb, cf = np.clip(cb - lo, 0, 12), np.clip(cf - lo, 0, 12)
+        if lean is not None:                       # what lies with the green lines leans to the figure
+            cb, cf = cb + LEAN * np.maximum(lean, 0), cf + LEAN * np.maximum(-lean, 0)
         cf = np.where(R if ph is None else R & ~ph, 500.0, cf)       # the frame's edge is background
         if ph is not None:
             cb = np.where(ph, 500.0, cb)
@@ -288,19 +336,97 @@ def photo(img, keep_hint=None, drop_hint=None, side=260, gamma=18.0, rounds=4, s
         fg = new
         if fg.mean() < 0.01 or fg.mean() > 0.98:
             break
-    cc, n = ndi.label(fg)
-    if n:
-        sz = np.bincount(cc.ravel())
-        sz[0] = 0
-        keep = cc == sz.argmax()
-        if ph is not None:                         # every part the user marked stays
-            keep |= np.isin(cc, np.unique(cc[ph])) & (cc > 0)
-        fg = ndi.binary_fill_holes(keep)
+    fg = _main(fg, ph, pb)
     H, W = img.shape[:2]
     s = np.asarray(Image.fromarray((fg * 255).astype(np.uint8)).resize((W, H), Image.BICUBIC)).astype(np.float32) / 255
-    I = ndi.gaussian_filter(lab32(img)[..., 0], 0.8)
-    q = ndi.gaussian_filter(np.clip(guided(I, _stats(I, 6), s, 6, 30.0), 0, 1), 1.2)
-    return q > 0.5, {"stable": same[-1] if same else 0.0}
+    L = lab32(img)
+    I = ndi.gaussian_filter(L[..., 0], 0.8)
+    guess = ndi.gaussian_filter(np.clip(guided(I, _stats(I, 6), s, 6, 30.0), 0, 1), 1.2) > 0.5
+    info = {"stable": same[-1] if same else 0.0, "rough": guess}
+    if fine and guess.any() and not guess.all():
+        return _edge(L, guess, keep_hint, drop_hint, W / w, rng), info
+    return guess, info
+
+
+LEAN, KAPPA = 6.0, 4.0     # pull of the lines; how long a way crossing an edge is
+
+
+def _lean(X, ph, pb):
+    """-1..1: how much nearer a pixel is to the green lines (1) than to the red ones (-1), walking over the
+    picture, where crossing an edge of its own is a long way."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import dijkstra
+    h, w = ph.shape
+    idx = np.arange(h * w).reshape(h, w)
+    a = np.concatenate([idx[:, :-1].ravel(), idx[:-1].ravel()])
+    b = np.concatenate([idx[:, 1:].ravel(), idx[1:].ravel()])
+    step = np.concatenate([np.linalg.norm(X[:, 1:] - X[:, :-1], axis=-1).ravel(),
+                           np.linalg.norm(X[1:] - X[:-1], axis=-1).ravel()])
+    G = coo_matrix((1.0 + KAPPA * step, (a, b)), shape=(h * w,) * 2).tocsr()
+    far = []
+    for m in (ph, pb):
+        src = np.flatnonzero(m)
+        if not len(src):
+            return None
+        far.append(dijkstra(G, directed=False, indices=src, min_only=True).reshape(h, w))
+    df, db = far
+    return (db ** 2 - df ** 2) / (db ** 2 + df ** 2 + 1e-6)
+
+
+def _main(fg, ph=None, pb=None):
+    """The biggest part, the parts the user marked green, their holes filled (not one marked red)."""
+    cc, n = ndi.label(fg)
+    if not n:
+        return fg
+    sz = np.bincount(cc.ravel())
+    sz[0] = 0
+    keep = cc == sz.argmax()
+    if ph is not None:                             # every part the user marked stays
+        keep |= np.isin(cc, np.unique(cc[ph])) & (cc > 0)
+    hole = ndi.binary_fill_holes(keep) & ~keep
+    if pb is not None:                             # a hole the user marked red stays open
+        cc, n = ndi.label(hole)
+        hole &= ~np.isin(cc, np.unique(cc[pb & hole]))
+    return keep | hole
+
+
+def _edge(L, guess, keep_hint, drop_hint, k, rng, gamma=12.0):
+    """The edge cut again at the picture's own size, only in a band around the first guess (that was cut
+    k times smaller): colours learnt just inside and just outside it, the price of a cut low where the
+    picture has an edge of its own."""
+    H, W = guess.shape
+    r = max(3, round(2.5 * k))
+    d = np.where(guess, ndi.distance_transform_edt(guess), ndi.distance_transform_edt(~guess))
+    band = d <= r
+    # where the figure stopped at the frame's edge strip (taken as background), the band reaches the edge
+    t = max(2, round(0.03 * min(H, W)))
+    yy, xx = np.ogrid[0:H, 0:W]
+    to_edge = np.minimum(np.minimum(yy, H - 1 - yy), np.minimum(xx, W - 1 - xx))
+    band |= (to_edge < t + 2) & ~guess & (d <= t + r + 2)
+    ph = keep_hint if keep_hint is not None and keep_hint.shape == guess.shape else None
+    pb = drop_hint if drop_hint is not None and drop_hint.shape == guess.shape else None
+    # colour only: a texture measure is high right next to any strong edge, on both sides of it
+    sm = ndi.gaussian_filter(L, (0.8, 0.8, 0))
+    near = (d > r) & (d <= 5 * r)
+    sel_f, sel_b = guess & near, ~guess & near & (to_edge >= t + 2)
+    if ph is not None:
+        sel_f, sel_b = sel_f | ph, sel_b & ~ph
+    if pb is not None:
+        sel_f, sel_b = sel_f & ~pb, sel_b | pb
+    if sel_f.sum() < 300 or sel_b.sum() < 300:
+        return guess
+    Fb = sm[band]
+    cb, cf = _Colours(sm[sel_b], 5, rng).cost(Fb), _Colours(sm[sel_f], 5, rng).cost(Fb)
+    lo = np.minimum(cb, cf)
+    cb, cf = np.clip(cb - lo, 0, 12), np.clip(cf - lo, 0, 12)
+    if ph is not None:
+        cb = np.where(ph[band], 500.0, cb)
+    if pb is not None:
+        cf = np.where(pb[band], 500.0, cf)
+    out = _band_cut(band, guess, cb, cf, sm, gamma)
+    # a pixel's worth of fringe off, then only what hangs together with the figure, without crumbs or pinholes
+    out = ndi.gaussian_filter(out.astype(np.float32), 1.0) > 0.5
+    return _main(out, ph, pb)
 
 
 # ------------------------------------------------------------------ the picture and its areas
@@ -325,10 +451,12 @@ def _found(path: str, mtime: float, kadraj: str) -> tuple:
     if sade.kind(img, lambda: own)[0] == "ton":   # a photograph or painting: no flat areas to go by
         lab = None
         keep, info = photo(img)
+        # the fine edge pass lays any cut along some edge: the cut before it must pass the test too
+        puan, why = max(judge(img, keep, info), judge(img, info.pop("rough"), info), key=lambda v: RANK[v[0]])
     else:
         lab = renk.label(img, own).astype(np.int32)
         keep, info = flat(img, lab)
-    puan, why = judge(img, keep, info)
+        puan, why = judge(img, keep, info)
     if puan == "zor":                            # rather nothing than a wrong cut: the user picks
         keep = np.ones_like(keep)
     for a in (img, lab, keep):
