@@ -349,11 +349,13 @@ def photo(img, keep_hint=None, drop_hint=None, side=260, gamma=18.0, rounds=4, s
 
 
 LEAN, KAPPA = 6.0, 4.0     # pull of the lines; how long a way crossing an edge is
+REACH = 0.12               # the pull fades out this far from the line, as a share of the picture's longer side
 
 
 def _lean(X, ph, pb):
     """-1..1: how much nearer a pixel is to the green lines (1) than to the red ones (-1), walking over the
-    picture, where crossing an edge of its own is a long way."""
+    picture, where crossing an edge of its own is a long way. Only near a line: a part far from every line
+    is left to its colours, however few lines there are."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import dijkstra
     h, w = ph.shape
@@ -370,7 +372,9 @@ def _lean(X, ph, pb):
             return None
         far.append(dijkstra(G, directed=False, indices=src, min_only=True).reshape(h, w))
     df, db = far
-    return (db ** 2 - df ** 2) / (db ** 2 + df ** 2 + 1e-6)
+    lean = (db ** 2 - df ** 2) / (db ** 2 + df ** 2 + 1e-6)
+    near = np.where(lean > 0, ndi.distance_transform_edt(~ph), ndi.distance_transform_edt(~pb))
+    return lean * np.clip(1 - near / (REACH * max(h, w)), 0, 1)
 
 
 def _main(fg, ph=None, pb=None):
