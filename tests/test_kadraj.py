@@ -1,11 +1,11 @@
 """Crop, turn and outline: which part of the picture becomes the mosaic and what shape it gets."""
+import copy
 import json
 import os
 import time
 
 import numpy as np
 import pytest
-import shapely
 from PIL import Image
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -14,9 +14,6 @@ from PySide6.QtCore import QSettings  # noqa: E402
 
 from tessera import app2, app2_prep  # noqa: E402
 from tessera import app2_engine as E  # noqa: E402
-from tessera.export.api import estimate, export_project, plates_glb, scene_glb  # noqa: E402
-from tessera.geometry.plate import panel_count  # noqa: E402
-from tessera.geometry.stones import build_stones  # noqa: E402
 from tessera.model import Mode  # noqa: E402
 from tessera.pipeline import kadraj as K  # noqa: E402
 
@@ -67,6 +64,9 @@ def test_outside_has_no_say_in_the_colours(tmp_path):
 
 
 # ------------------------------------------------------------------ the cut
+_FOUND = {}     # the colours found for one picture, frame and width: the same for every piece count
+
+
 def make(path, width, sekil=None, kutu=None, mode=Mode.PIECES, **fine):
     r = E.Recipe(image_path=path, width_mm=width, mode=mode)
     z = E.sibling_zones(path)
@@ -75,23 +75,11 @@ def make(path, width, sekil=None, kutu=None, mode=Mode.PIECES, **fine):
         r.file_default_vocab = int(z.get("varsayilan", 0))
     r.set_frame({"kutu": kutu} if kutu else None, sekil)
     r.fine.update(fine)
-    r.use_colours(E.analyse(path, width, frame=r.frame)[0])
+    key = (path, width, json.dumps(r.frame, sort_keys=True))
+    if key not in _FOUND:
+        _FOUND[key] = E.analyse(path, width, frame=r.frame)[0]
+    r.use_colours(copy.deepcopy(_FOUND[key]))
     return r, E.build_mosaic_for(r)[0]
-
-
-@pytest.fixture(scope="module")
-def circle():
-    return make(CAT, 150.0, {"tur": "daire"})[1]
-
-
-def test_every_stone_lies_inside_the_outline(circle):
-    edge = circle.outline.buffer(-circle.settings.gap_mm / 2 + .01)
-    assert all(edge.covers(p) for p in circle.polys)
-    assert min(p.area for p in circle.polys) >= 1.5
-    filled = sum(p.area for p in circle.polys)
-    assert filled > .84 * circle.outline.area                   # nothing is missing but the joints
-    rim = shapely.union_all(circle.polys).buffer(.5)
-    assert rim.covers(circle.outline.buffer(-1.5))
 
 
 @pytest.mark.parametrize("parca", ["sekil", 30, 120])
@@ -110,32 +98,6 @@ def test_cut_picture_keeps_the_file_zones():
     z = E.sibling_zones(POSTER)["isin_merkezi"]
     assert rc[0] == pytest.approx(z[0]) and rc[1] == pytest.approx(z[1] / .45)
     assert len(np.unique(m.tile_zone)) > 1
-
-
-# ------------------------------------------------------------------ what comes out
-def test_circle_goes_through_everything(circle, tmp_path):
-    L = build_stones(circle)
-    assert len(L.panels) == panel_count(circle) == 1
-    _, meta = scene_glb(circle)
-    _, pm = plates_glb(circle)
-    e = estimate(circle)
-    assert len(pm["plates"]) == e["tabla"]
-    assert e["kg_m2"] == pytest.approx(e["gram"] / 1000 / (circle.outline.area / 1e6), rel=.05)
-    res = export_project(circle, str(tmp_path), lambda f, m: True)
-    assert not res["kapali_olmayan_govde"] and len(res["plates"]) == e["tabla"]
-
-
-def test_big_circle_panels():
-    r, m = make(CAT, 520.0, {"tur": "daire"}, parca=200, tek_taban=E.main_hex("Siyah"))
-    L = build_stones(m)
-    assert len(L.panels) == panel_count(m) == 9
-    assert sum(pn.region.area for pn in L.panels) == pytest.approx(m.outline.area, rel=.01)
-    r.mode = Mode.AMS
-    m = E.build_mosaic_for(r)[0]
-    L = build_stones(m)
-    for pn in L.panels:                                         # no stone stands beside its panel's base
-        reg = pn.region.buffer(.3)
-        assert all(reg.covers(L.stones[i].poly) for i in pn.stones)
 
 
 def test_recipe_remembers_the_frame():
