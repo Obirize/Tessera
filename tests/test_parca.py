@@ -189,3 +189,25 @@ def test_numbers_for_the_control(whole, cat):
     r.fine["parca"] = 150
     m = E.build_mosaic_for(r)[0]
     assert E.piece_info(m)["cizgi"] is None and abs(m.n_tiles - 150) <= 3              # an ordinary picture gets no plate offered
+
+
+def test_removed_lines_leave_no_knobs():
+    """A window of 4 x 4 panes: where a piece of line goes, nothing of it stays stuck on the lines that cross it."""
+    from tessera.pipeline import kesim, parca
+    from tessera.pipeline.palette import rgb_to_lab
+    t, bands = 12, [0, 114, 234, 354, 468]
+    lab = np.zeros((480, 480), np.int16)
+    for c in bands:
+        lab[c:c + t] = 1
+        lab[:, c:c + t] = 1
+    plab = rgb_to_lab(np.array([[240, 238, 230], [25, 25, 28]], np.uint8)).astype(float)
+    for K in (12, 5):
+        out, _ = parca.reduce(lab, 2, plab, 0.25, K, base=1)
+        assert kesim.count_areas(out, 2, 1) <= K
+        blk, left = out == 1, 0
+        for a, b in zip(bands[:-1], bands[1:]):
+            for c in bands[1:-1]:
+                for piece in (blk[a + t:b, c:c + t], blk[c:c + t, a + t:b]):
+                    if piece.mean() < 0.9:                   # this piece was taken away
+                        left += int(piece.sum())
+        assert left <= 120                                   # before: 312 and 530 pixels of knobs

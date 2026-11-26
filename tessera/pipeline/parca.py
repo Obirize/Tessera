@@ -176,9 +176,9 @@ def _ops(lab, n, plab, mm, width_mm, base):
     return ops, L, col
 
 
-def bridge(sm, L, i, j, a, sl, seg, w, colour):
+def bridge(sm, L, i, j, a, sl, seg, w, colour, line=None):
     """The line between the areas i and j takes their colour - only what lies between the two: where they end
-    the line ends too, in a smooth curve."""
+    the line ends too, in a smooth curve. line: the colour that draws the picture's lines (contour), if any."""
     r = 0.55 * w + 1.0
     pad = int(3 * r) + 2
     ys, xs = np.nonzero(seg)
@@ -191,10 +191,34 @@ def bridge(sm, L, i, j, a, sl, seg, w, colour):
         d = np.pad(ndi.distance_transform_edt(~m) <= r, 1)
         return ndi.distance_transform_edt(d)[1:-1, 1:-1] > r
     fill = closed((v == i) | (v == j)) & ~closed(v == i) & ~closed(v == j) & (v == a)
+    if line is not None and fill.any() and int(sm[q][v == a][0]) == line:
+        fill |= knobs(L, q, i, j, a, sl, seg, w, fill)
     if fill.any():
         sm[q][fill] = colour
     else:
         sm[sl][seg] = colour
+
+
+def knobs(L, q, i, j, a, sl, seg, w, fill):
+    """Where a removed line met a line that stays, the closing stops short and leaves a knob on that line.
+    A knob is line that lies farther from every other area than a line is wide (so it parts nothing), is thin
+    (not a wide area of the line colour) and is just past what was filled. -> mask in the window q."""
+    H, W = L.shape
+    big = int(2 * w) + 3
+    Q = slice(max(0, q[0].start - big), min(H, q[0].stop + big)), slice(max(0, q[1].start - big), min(W, q[1].stop + big))
+    V = L[Q]
+    A = V == a
+    # distance to an area that is neither the line nor i or j; beyond the picture counts as one
+    far = ndi.distance_transform_edt(np.pad(A | (V == i) | (V == j), 1, constant_values=False))[1:-1, 1:-1]
+    mid = np.zeros(V.shape, bool)
+    ys, xs = np.nonzero(seg)
+    mid[sl[0].start + ys - Q[0].start, sl[1].start + xs - Q[1].start] = True
+    oy, ox = q[0].start - Q[0].start, q[1].start - Q[1].start
+    F = np.zeros(V.shape, bool)
+    F[oy:oy + fill.shape[0], ox:ox + fill.shape[1]] = fill
+    k = (A & ~F & (far > w + 0.5) & (ndi.distance_transform_edt(A) <= 0.5 * w + 1)
+         & (ndi.distance_transform_edt(~mid) <= 1.5 * w) & (ndi.distance_transform_edt(~F) <= 0.5 * w + 1))
+    return k[oy:oy + fill.shape[0], ox:ox + fill.shape[1]]
 
 
 def reduce(lab, n, plab, res, K, base=None, extra=None):
@@ -208,6 +232,7 @@ def reduce(lab, n, plab, res, K, base=None, extra=None):
     mm = res * f
     sm = kesim.drop_specks(sm, n, max(2, 3.0 / mm ** 2), n)
     start = sm.copy()
+    line = contour(sm, n)                        # only removed lines of this colour can leave knobs
     # A nose or an eye is not given away to reach the number: up to `extra` stones more than asked for (the
     # window shows the real number) are better than a lost feature. Asked for even fewer, the least visible goes.
     if extra is None:
@@ -245,7 +270,7 @@ def reduce(lab, n, plab, res, K, base=None, extra=None):
             else:
                 i, j, a, sl, seg, w = data
                 was = sm.copy() if stuck else None
-                bridge(sm, L, i, j, a, sl, seg, w, col[i])
+                bridge(sm, L, i, j, a, sl, seg, w, col[i], line)
                 if stuck and kesim.count_areas(sm, n, base) >= kesim.count_areas(was, n, base):
                     sm = was
                     continue
