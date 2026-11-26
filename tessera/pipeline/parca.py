@@ -109,11 +109,23 @@ def _ops(lab, n, plab, mm, width_mm, base):
     o = np.lexsort((c / np.maximum(dE, 6.0) ** 1.3, x))
     xs, ys, ds = x[o], y[o], dE[o]
     last = np.r_[xs[1:] != xs[:-1], True] if len(xs) else np.zeros(0, bool)
+    # an area larger than any feature, or the last area of a colour, that would clearly change colour: that hurts
+    # more than a lost feature
+    left = np.bincount(col[art], minlength=n + 1)
+    big = (area >= FEAT_AS) | (left[col] == 1)
+    dear = set()
     for i, j, d in zip(xs[last], ys[last], ds[last]):
         if base is not None and col[i] == base:
             continue                                           # the plate is no stone: giving it away gains nothing
         a = max(area[i], FEAT_AS) if feat[i] else area[i]          # a nose weighs like a whole stone
         ops.append((size(a, 0.5) * d * weight[i], 0, (int(i), int(j)), bool(feat[i])))
+        if big[i] and not feat[i] and d >= FEAT_DE:
+            dear.add(len(ops) - 1)
+    # ... so those go only after every feature (all dearer by one factor: their order stays)
+    top = max((t[0] for t in ops if t[3]), default=0.0)
+    low = min((ops[q][0] for q in dear), default=np.inf)
+    m = max(1.0, 1.001 * top / low)
+    ops = [(t[0] * m,) + t[1:] if q in dear else t for q, t in enumerate(ops)]
     # the line between two areas of one colour
     T = max(2.0, (0.022 if base is None else 0.03) * math.sqrt(total))
     def lines_of(job):
