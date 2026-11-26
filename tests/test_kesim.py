@@ -82,18 +82,18 @@ def test_no_colour_in_between(mosaics):
     assert not any(c == 0 and p.intersects(head) for p, c in zip(m.polys, m.tile_colour))
 
 
-def test_ams_prints_small_shapes_into_the_stones():
+def test_ams_prints_small_shapes_into_the_stones(mosaics):
     import shapely
 
     def touching(m):              # neighbouring pieces of different colours without a joint between them
         a, b = shapely.STRtree(m.polys).query(m.polys, predicate="dwithin", distance=0.05)
         return int((m.tile_colour[a] != m.tile_colour[b]).sum())
-    assert touching(make()) == 0                       # single colour: a colour change is always a cut
+    assert touching(mosaics["mozaik"]) == 0            # single colour: a colour change is always a cut
     assert touching(make(mode="ams")) > 0              # AMS: the eye is printed into its stone
 
 
-def test_height_settings():
-    flat = make()
+def test_height_settings(mosaics):
+    flat = mosaics["mozaik"]                                           # = make()
     assert np.ptp(flat.tile_plane[:, 0]) == 0                          # even surface by default
     rough = make(h_jitter_mm=0.8, stone_h_mm=4.0)
     z = rough.tile_plane[:, 0]
@@ -151,19 +151,22 @@ def test_opening_card_comes_before_the_window():
     assert json.dumps([c["name"] for c in E.style_cards()], ensure_ascii=False) == '["Mozaik", "Kırık taş", "Blok", "İri parça"]'
 
 
-def test_plate_count_on_screen_is_the_real_one(tmp_path):
+def test_plate_count_on_screen_is_the_real_one(mosaics, tmp_path):
     from tessera.export.api import export_project, plates_glb
-    m = make()
-    for order in ("panel", "renk"):
-        m.settings.plate_order = order
-        e = estimate(m)
-        real = plates_glb(m)[1]["plates"]
-        assert e["tabla"] == len(real) and e["tabla_kesin"]
-        assert sum(p["hours"] for p in real) == pytest.approx(e["saat"], abs=0.4)
-    res = export_project(m, str(tmp_path / "o"))
-    assert len(res["plates"]) == e["tabla"] and res["hours"] == pytest.approx(e["saat"], abs=0.06)
-    rough = estimate(m, exact=False)                                    # the card that is not selected: marked as rough
-    assert not rough["tabla_kesin"] and abs(rough["tabla"] - e["tabla"]) <= 1
+    m = mosaics["mozaik"]                                               # = make()
+    try:
+        for order in ("panel", "renk"):
+            m.settings.plate_order = order
+            e = estimate(m)
+            real = plates_glb(m)[1]["plates"]
+            assert e["tabla"] == len(real) and e["tabla_kesin"]
+            assert sum(p["hours"] for p in real) == pytest.approx(e["saat"], abs=0.4)
+        res = export_project(m, str(tmp_path / "o"))
+        assert len(res["plates"]) == e["tabla"] and res["hours"] == pytest.approx(e["saat"], abs=0.06)
+        rough = estimate(m, exact=False)                                # the card that is not selected: marked as rough
+        assert not rough["tabla_kesin"] and abs(rough["tabla"] - e["tabla"]) <= 1
+    finally:
+        m.settings.plate_order = "panel"
 
 
 def test_remembered_colour_areas_change_nothing():

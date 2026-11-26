@@ -41,7 +41,8 @@ def art(w: int, h: int) -> Image.Image:
     return im
 
 
-def build(src, palette, width_mm=200.0, mm=0.8, zone_fn=None, default_vocab=0):
+def build(src, palette, width_mm=120.0, mm=0.8, zone_fn=None, default_vocab=0):
+    """(120 mm: the odd inputs here do not need a big piece, and a small one builds twice as fast)"""
     s = Settings(width_mm=width_mm, mm_per_px=mm, palette=list(palette), default_vocab=default_vocab)
     img = load_image(src, s)
     zone = zone_fn(img.shape[:2]) if zone_fn else None

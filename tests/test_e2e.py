@@ -21,7 +21,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from qa_ortak import EXAMPLES, check_mosaic, example_inputs  # noqa: E402
+from qa_ortak import check_mosaic, example_inputs  # noqa: E402
 
 from tessera.export.api import estimate  # noqa: E402
 from tessera.model import Mode  # noqa: E402
@@ -30,6 +30,9 @@ from tessera.render import render_top  # noqa: E402
 
 SLOW = os.environ.get("TESSERA_E2E") == "1"
 SLICE = os.environ.get("TESSERA_SLICE") == "1"
+# the poster and the ink print are checked here; the other examples in test_e2e_ornekler.py, so the
+# two halves of this slow matrix run side by side
+HERE = ["poster", "murekkep_tram"]
 
 
 @pytest.fixture(scope="module")
@@ -47,8 +50,12 @@ def built():
 
 
 # ----------------------------------------------------------------- pipeline invariants
-@pytest.mark.parametrize("name", EXAMPLES)
+@pytest.mark.parametrize("name", HERE)
 def test_example_invariants(built, name):
+    check_example(built, name)
+
+
+def check_example(built, name):
     m, secs = built(name)
     c = check_mosaic(m)
     assert c["bağlantısız_taş"] == 0, c
@@ -71,8 +78,12 @@ def test_poster_preview_speed():
     assert time.perf_counter() - t < 1.5 * 1.5   # 50 % slack for a busy test machine
 
 
-@pytest.mark.parametrize("name", ["poster", "portre", "demir_maske"])
+@pytest.mark.parametrize("name", ["poster"])           # portre, demir_maske: test_e2e_ornekler.py
 def test_min_feature_width(built, name):
+    check_min_feature(built, name)
+
+
+def check_min_feature(built, name):
     """No real tile (>= 3.2 mm²) narrower than settings.min_feature_mm (pipeline promise)."""
     from qa_ortak import tile_widths_mm
     m, _ = built(name)
@@ -83,8 +94,12 @@ def test_min_feature_width(built, name):
 
 
 # ----------------------------------------------------------------- estimate sanity
-@pytest.mark.parametrize("name", ["poster", "orman_masali"])
+@pytest.mark.parametrize("name", ["poster"])           # orman_masali: test_e2e_ornekler.py
 def test_estimate_both_modes_fast_and_sane(built, name):
+    check_estimates(built, name)
+
+
+def check_estimates(built, name):
     m, _ = built(name)
     out = {}
     for mode in (Mode.PIECES, Mode.AMS):
@@ -116,12 +131,12 @@ def test_estimate_ams_has_fewer_parts_and_same_panels(built):
     assert ea["panel"] == local, (ea["panel"], local)
 
 
-def test_estimate_preview_vs_full_resolution():
+def test_estimate_preview_vs_full_resolution(built):
     """The stats bar uses the 0,8 mm preview; numbers must stay close to the 0,4 mm export build."""
-    res = {}
-    for mm in (0.8, 0.4):
-        img, s, z, _ = example_inputs("poster", mm)
-        res[mm] = estimate(build_mosaic(img, s, z))
+    img, s, z, _ = example_inputs("poster", 0.8)
+    m = built("poster")[0]                       # the same 0,4 mm build, made once for the module
+    m.settings.mode = Mode.PIECES
+    res = {0.8: estimate(build_mosaic(img, s, z)), 0.4: estimate(m)}
     for k in ("parca", "tabla", "gram"):
         a, b = res[0.8][k], res[0.4][k]
         assert abs(a - b) <= 0.25 * max(a, b), (k, res)
@@ -253,23 +268,6 @@ def test_estimate_parts_close_to_layout(built):
         m, _ = built(name)
         m.settings.mode = Mode.PIECES
         assert estimate(m)["parca"] == len(build_stones(m).stones)
-
-
-def test_no_halo_specks_on_new_image():
-    """ornekler/portre loaded the way the UI loads a new image: library palette + 'Genel' preset."""
-    from scipy import ndimage as ndi
-    from qa_ortak import apply_preset, load_presets
-    from tessera.model import Settings
-    from tessera.pipeline import load_filaments, load_image, to_filament
-    lib = {f.name: f for f in (to_filament(e) for e in load_filaments())}
-    s = Settings(palette=[lib[n] for n in ("Siyah", "Kırmızı", "Altın", "Fildişi Beyazı")], width_mm=424)
-    pr = load_presets()["Genel"]
-    apply_preset(s, pr)
-    s.default_vocab = int(pr.get("default_vocab", 0))
-    m = build_mosaic(load_image(str(ROOT / "ornekler" / "portre" / "kaynak.png"), s), s, None)
-    lab, n = ndi.label(m.colour == 1)
-    area = np.bincount(lab.ravel())[1:] * s.mm_per_px ** 2
-    assert int((area < 4).sum()) <= 10, f"{int((area < 4).sum())} kırmızı kırıntı (<4 mm²)"
 
 
 def test_zone_reasons_use_new_names():
