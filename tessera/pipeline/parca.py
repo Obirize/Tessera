@@ -1,7 +1,8 @@
 """Exactly N stones from a map of colour areas.
 
 1. reduce()    too many areas: the least visible shape goes to its neighbour, or the line between two areas of one
-               colour goes (both become one area); cheapest change first
+               colour goes (both become one area); cheapest change first. A small shape that stands out (a nose,
+               an eye: features()) keeps its colour; for it the number may come out a few stones higher
 2. allot()     every area gets its number of stones (highest averages: stone sizes as even as possible)
 3. divide()    few stones: balanced cuts across the shape (Fiedler level sets); many: the program's own rows,
                stone size searched per area, then trimmed to the exact number
@@ -30,6 +31,10 @@ PLATE = 235.0            # largest stone side that fits a 256 mm printer
 HAND_A = 16.0            # smallest stone that texture cuts may make, mm2 (about 4 x 4 mm)
 HAND_W = 4.0
 ROWS_N, ROWS_W = 40, 5.5
+# a small shape that stands out (nose, eye): at least this big (and 1/2000 of the picture) and wide (mm2, mm), this
+# far from every neighbour's colour; giving it away costs as much as giving away a shape of FEAT_AS mm2 (one stone
+# that stays whole)
+FEAT_A, FEAT_W, FEAT_DE, FEAT_AS = 8.0, 2.0, 25.0, kesim.FEATURE_A
 
 
 def comps(lab, n, skip=None):
@@ -47,8 +52,32 @@ def comps(lab, n, skip=None):
 
 
 # ------------------------------------------------------------------ 1. fewer areas
+def features(L, col, n, plab, mm, base=None, x=None, y=None, dE=None):
+    """Small shapes that stand out: a colour clearly unlike every neighbour's, big enough to see. L, col: comps
+    (lab, n + 1); plab: Lab values with one more row for the outside. x, y, dE: the neighbour pairs, when known."""
+    K = len(col)
+    area = np.bincount(L.ravel(), minlength=K) * mm * mm
+    if x is None:
+        lo, hi, _ = _adjacency(L, K)
+        x, y = np.r_[lo, hi], np.r_[hi, lo]
+        k = (col[x] < n) & (col[y] < n)
+        x, y = x[k], y[k]
+        dE = np.linalg.norm((plab[col[x]] - plab[col[y]]) * WT, axis=1)
+    near = np.full(K, np.inf)
+    np.minimum.at(near, x, dE)
+    a0 = max(FEAT_A, 0.0005 * area[col < n].sum())             # crumbs of a large picture are no features
+    out = (col < n) & (area >= a0) & (area < FEAT_AS) & (near >= FEAT_DE) & np.isfinite(near)
+    if base is not None:
+        out &= col != base
+    box = ndi.find_objects(L + 1)
+    for i in np.flatnonzero(out):
+        m = np.pad(L[box[i]] == i, 1)
+        out[i] = 2 * ndi.distance_transform_edt(m).max() * mm >= FEAT_W
+    return out
+
+
 def _ops(lab, n, plab, mm, width_mm, base):
-    """Every possible change, cheapest first: (cost, kind, data). Works on the coarse map."""
+    """Every possible change, cheapest first: (cost, kind, data, a feature is given away). Works on the coarse map."""
     L, col = comps(lab, n + 1)
     K = len(col)
     area = np.bincount(L.ravel(), minlength=K) * mm * mm
@@ -60,6 +89,7 @@ def _ops(lab, n, plab, mm, width_mm, base):
     k = art[x] & art[y]
     x, y, c = x[k], y[k], c[k]
     dE = np.linalg.norm((plab[col[x]] - plab[col[y]]) * WT, axis=1)
+    feat = features(L, col, n, plab, mm, base, x, y, dE)
     cy, cx = (np.bincount(L.ravel(), g.ravel(), K) for g in np.mgrid[0:lab.shape[0], 0:lab.shape[1]].astype(float))
     npx = np.bincount(L.ravel(), minlength=K)
     cen = np.stack([cy / npx, cx / npx], 1) * mm
@@ -82,7 +112,8 @@ def _ops(lab, n, plab, mm, width_mm, base):
     for i, j, d in zip(xs[last], ys[last], ds[last]):
         if base is not None and col[i] == base:
             continue                                           # the plate is no stone: giving it away gains nothing
-        ops.append((size(area[i], 0.5) * d * weight[i], 0, (int(i), int(j))))
+        a = max(area[i], FEAT_AS) if feat[i] else area[i]          # a nose weighs like a whole stone
+        ops.append((size(a, 0.5) * d * weight[i], 0, (int(i), int(j)), bool(feat[i])))
     # the line between two areas of one colour
     T = max(2.0, (0.022 if base is None else 0.03) * math.sqrt(total))
     def lines_of(job):
@@ -124,7 +155,7 @@ def _ops(lab, n, plab, mm, width_mm, base):
                 continue
             d = float(np.linalg.norm((plab[col[a]] - plab[col[i]]) * WT))
             seg = good & (kn == pair)
-            found.append((size(sa[q], 0.5) * d * max(rare[i], 1.0), 1, (i, j, a, sl, seg, float(np.percentile(w[seg], 90)) / mm)))
+            found.append((size(sa[q], 0.5) * d * max(rare[i], 1.0), 1, (i, j, a, sl, seg, float(np.percentile(w[seg], 90)) / mm), False))
         return found
 
     with ThreadPoolExecutor(6) as ex:
@@ -155,45 +186,65 @@ def bridge(sm, L, i, j, a, sl, seg, w, colour):
         sm[sl][seg] = colour
 
 
-def reduce(lab, n, plab, res, K, base=None):
-    """Colour map with at most K areas (not counting the base colour)."""
+def reduce(lab, n, plab, res, K, base=None, extra=None):
+    """(colour map with at most K + over areas (not counting the base colour), over). over > 0 only where the
+    next change would give away a small shape that stands out; never more than extra (None: see below)."""
     if kesim.count_areas(lab, n, base) <= K:
-        return lab
+        return lab, 0
     width = lab.shape[1] * res
     f = max(1, int(min(0.8, math.sqrt(lab.size * res * res / 140_000)) / res + 0.05))
     sm = lab[f // 2::f, f // 2::f].astype(np.int16).copy()
     mm = res * f
     sm = kesim.drop_specks(sm, n, max(2, 3.0 / mm ** 2), n)
     start = sm.copy()
-    best = None
+    # A nose or an eye is not given away to reach the number: up to `extra` stones more than asked for (the
+    # window shows the real number) are better than a lost feature. Asked for even fewer, the least visible goes.
+    if extra is None:
+        extra = max(1, min(3, K // 10))
+    keep = stuck = False
+    prev = None
     for _ in range(30):
         k = kesim.count_areas(sm, n, base)
-        if best is None or abs(k - K) < abs(best[0] - K):
-            best = (k, sm.copy())
-        if k <= K:
+        if prev is not None and k >= prev[0]:
+            # the lines taken away cut other areas in two (back and forth without end): undo, and from now on
+            # a line goes only where that leaves fewer areas
+            k, sm = prev
+            stuck = True
+        if k <= K or keep:
             break
         ops, L, col = _ops(sm, n, plab, mm, width, base)
         if not ops:
             break
+        prev = (k, sm.copy())
         todo = max(1, (k - K + 1) // 2) if k - K > 3 else k - K
-        used, top, first = set(), 0.0, ops[0][0]
-        for cost, kind, data in ops:
+        used, top, first, took = set(), 0.0, None, 0
+        for cost, kind, data, feat in ops:
             if todo <= 0 and cost > 1.12 * top:                # look-alikes (both eyes) go together
                 break
             if used and cost > (2.0 if k < 2 * K else 2.8) * first:                    # the cheap ones are taken: look again first
                 break
             if data[0] in used or data[1] in used:
                 continue
+            if feat and k - took <= K + extra:                 # the cheapest change left gives a feature away
+                keep = True
+                break
             if kind == 0:
                 i, j = data
                 sm[L == i] = col[j]
-                used |= {i, j}
             else:
                 i, j, a, sl, seg, w = data
+                was = sm.copy() if stuck else None
                 bridge(sm, L, i, j, a, sl, seg, w, col[i])
-                used |= {i, j}
+                if stuck and kesim.count_areas(sm, n, base) >= kesim.count_areas(was, n, base):
+                    sm = was
+                    continue
+            used |= {i, j}
+            first = cost if first is None else first
+            took += 1
             top = cost
             todo -= 1
+        if not took and not keep:
+            break
         sm = kesim.drop_specks(sm, n, max(2, 3.0 / mm ** 2), n)
     changed = ndi.binary_dilation(sm != start, iterations=2)
     H, W = lab.shape
@@ -207,18 +258,47 @@ def reduce(lab, n, plab, res, K, base=None):
     ch = np.asarray(Image.fromarray(changed.view(np.uint8) * 255).resize((W, H), Image.NEAREST)) > 127
     out = same_edge(np.where(ch, big, lab).astype(np.int16), lab, n)
     out = kesim.drop_specks(out, n, kesim.MIN_A / res ** 2, n)
-    # crumbs the change left behind: the smallest areas go until the number fits
+    # crumbs the change left behind: the smallest areas go until the number fits; features only last, and not
+    # below K + extra
+    pl = np.vstack([plab, [[0.0, 0.0, 0.0]]])
     for _ in range(3):
         k = kesim.count_areas(out, n, base)
         if k <= K:
             break
-        L, col = comps(out, n)
-        sz = np.bincount(L[L >= 0], minlength=len(col)).astype(float)
+        L, col = comps(out, n + 1)                    # the outside's areas come last
+        sz = np.bincount(L.ravel(), minlength=len(col)).astype(float)
+        art = col < n
         if base is not None:
             sz[col == base] = 1e12
-        t = np.sort(sz)[k - K - 1]
-        out = kesim.drop_specks(out, n, min(t + 1, 60 / res ** 2), n)
-    return out
+        t = min(np.sort(sz[art])[k - K - 1] + 1, 60 / res ** 2)
+        feat = features(L, col, n, pl, res, base) & (sz < t)
+        if not feat.any():
+            out = kesim.drop_specks(out, n, t, n)
+            continue
+        o = np.lexsort((sz, feat))
+        o = o[art[o] & (sz[o] < t)][: k - K]
+        keep |= bool((feat[o] & (k - np.arange(len(o)) <= K + extra)).any())
+        o = o[~feat[o] | (k - np.arange(len(o)) > K + extra)]
+        if not len(o):
+            break
+        out = _give(out, L, o, n)
+    over = min(extra, kesim.count_areas(out, n, base) - K) if keep else 0
+    return out, max(0, over)
+
+
+def _give(lab, L, ids, n):
+    """The areas ids of L take the colour that surrounds them most (not the outside)."""
+    H, W = lab.shape
+    box = ndi.find_objects(L + 1)
+    for i in ids:
+        sl = box[i]
+        sl = slice(max(0, sl[0].start - 1), min(H, sl[0].stop + 1)), slice(max(0, sl[1].start - 1), min(W, sl[1].stop + 1))
+        m = L[sl] == i
+        v = lab[sl]
+        ring = ndi.binary_dilation(m) & ~m & (v != n)
+        if ring.any():
+            v[m] = np.bincount(v[ring]).argmax()
+    return lab
 
 
 def same_edge(lab, before, n):
@@ -673,22 +753,27 @@ def make(lab, n, plab, res, N, *, base=None, layout="mozaik", tonal=False, gap=0
     first, K, Nx, best, cur = lab, N, N, None, None
     if N is None:
         tries, cur, Nx, N = 1, lab, 0, 0
+    over = None                                                # stones more than asked for, to keep features
     for it in range(tries):
         report(it / tries, "Taşlar kesiliyor")
         if cur is None:
-            cur = reduce(first, n, plab, res, K, base)
+            cur, o = reduce(first, n, plab, res, K, base, over)
             if tonal and best is None:
                 first = cur = calm(cur, n, res, area / N)
-                cur = reduce(cur, n, plab, res, K, base)
-        S, L, col, info = divide(cur, n, res, Nx, base, layout, seed)
+                cur, o = reduce(cur, n, plab, res, K, base, over)
+            if over is None:                                   # fixed at the number asked for; no more later
+                over = o
+        over = over or 0
+        T = N + over
+        S, L, col, info = divide(cur, n, res, Nx + over, base, layout, seed)
         report((it + 0.7) / tries, "Taşların kenarı çiziliyor")
         polys, pc, ps = outlines(S, L, col, res, gap, edge)
-        e = len(polys) - N
-        if best is None or abs(e) < abs(len(best["polys"]) - N):
-            best = dict(polys=polys, colour=pc, stone=ps, label=S, lab=cur, areas=info["areas"])
-        if it == tries - 1 or abs(e) <= 0.01 * N or (e < 0 and info["left"] > 0):
+        e = len(polys) - T
+        if best is None or abs(e) < abs(len(best["polys"]) - best["T"]):
+            best = dict(polys=polys, colour=pc, stone=ps, label=S, lab=cur, areas=info["areas"], T=T)
+        if it == tries - 1 or abs(e) <= 0.01 * T or (e < 0 and info["left"] > 0):
             break
-        if e > 0 and info["need"] >= Nx - e:                   # every area is whole already: fewer areas
+        if e > 0 and info["need"] >= Nx + over - e:            # every area is whole already: fewer areas
             K -= e
             cur = None
             if K < 1:
@@ -696,6 +781,7 @@ def make(lab, n, plab, res, N, *, base=None, layout="mozaik", tonal=False, gap=0
         else:
             Nx = max(1, Nx - e)
     report(1.0, "Taşlar hazır")
+    best.pop("T")
     return best
 
 
